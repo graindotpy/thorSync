@@ -34,22 +34,6 @@ services:
       THORSYNC_SOFT_QUOTA_BYTES: "${THORSYNC_SOFT_QUOTA_BYTES:-5368709120}"
       THORSYNC_RESERVE_BYTES: "${THORSYNC_RESERVE_BYTES:-1073741824}"
       THORSYNC_RECONCILE_INTERVAL: "${THORSYNC_RECONCILE_INTERVAL:-15m}"
-    secrets:
-      - source: syncthing_api_key
-        target: syncthing_api_key
-        uid: "${PUID:-1000}"
-        gid: "${PGID:-1000}"
-        mode: 0600
-      - source: cf_audience
-        target: cf_audience
-        uid: "${PUID:-1000}"
-        gid: "${PGID:-1000}"
-        mode: 0600
-      - source: admin_email
-        target: admin_email
-        uid: "${PUID:-1000}"
-        gid: "${PGID:-1000}"
-        mode: 0600
     volumes:
       - type: bind
         source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/data"
@@ -63,6 +47,10 @@ services:
       - type: bind
         source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/sync/windows"
         target: /var/lib/thorsync/sync/windows
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/secrets"
+        target: /run/secrets
+        read_only: true
     ports:
       - name: web
         target: 8080
@@ -107,12 +95,6 @@ services:
         export STGUIAPIKEY="$$(cat /run/secrets/syncthing_api_key)"
         exec /bin/entrypoint.sh /bin/syncthing "$$@"
       - --
-    secrets:
-      - source: syncthing_api_key
-        target: syncthing_api_key
-        uid: "${PUID:-1000}"
-        gid: "${PGID:-1000}"
-        mode: 0600
     volumes:
       - type: bind
         source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/syncthing"
@@ -123,6 +105,10 @@ services:
       - type: bind
         source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/sync/windows"
         target: /var/syncthing/sync/windows
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/secrets"
+        target: /run/secrets
+        read_only: true
     ports:
       - name: gui
         target: 8384
@@ -193,14 +179,6 @@ networks:
   cloudflare:
     name: "${CLOUDFLARE_NETWORK:-thorsync-cloudflare}"
     external: true
-
-secrets:
-  syncthing_api_key:
-    file: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/secrets/syncthing_api_key"
-  cf_audience:
-    file: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/secrets/cf_audience"
-  admin_email:
-    file: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/secrets/admin_email"
 
 x-casaos:
   id: io.github.apgul.thorsync
