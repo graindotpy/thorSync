@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Go, migrations, and archive integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test backend
+        run: go test -race -count=1 ./...
+      - name: Vet backend
+        run: go vet ./...
+
+  frontend:
+    name: Frontend tests and production build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Test frontend
+        run: npm test --if-present
+      - name: Build frontend
+        run: npm run build
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      - name: Run browser flows
+        run: npm run test:e2e
+
+  compose:
+    name: ZimaOS Compose validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose and x-casaos source
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          test "$(docker compose config --format json | jq -r '.["x-casaos"].main')" = "thorsync"
+
+  container:
+    name: Container build and health smoke test
+    runs-on: ubuntu-latest
+    needs:
+      - backend
+      - frontend
+      - compose
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: thorsync:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Start isolated container
+        run: |
+          mkdir -p "$RUNNER_TEMP/thorsync-secrets"
+          printf '%s' test-api-key > "$RUNNER_TEMP/thorsync-secrets/syncthing_api_key"
+          printf '%s' test-audience > "$RUNNER_TEMP/thorsync-secrets/cf_audience"
+          printf '%s' admin@example.com > "$RUNNER_TEMP/thorsync-secrets/admin_email"
+          docker run -d --name thorsync-smoke \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --tmpfs /var/lib/thorsync:rw,uid=65532,gid=65532 \
+            -p 127.0.0.1:18080:8080 \
+            -e THORSYNC_LISTEN_ADDR=:8080 \
+            -e THORSYNC_DATA_DIR=/var/lib/thorsync/data \
+            -e THORSYNC_ARCHIVE_DIR=/var/lib/thorsync/archive \
+            -e THORSYNC_THOR_DIR=/var/lib/thorsync/sync/thor \
+            -e THORSYNC_WINDOWS_DIR=/var/lib/thorsync/sync/windows \
+            -e THORSYNC_SYNCTHING_URL=http://127.0.0.1:9 \
+            -e THORSYNC_SYNCTHING_API_KEY_FILE=/run/secrets/syncthing_api_key \
+            -e THORSYNC_AUTH_MODE=cloudflare \
+            -e THORSYNC_CF_ISSUER=https://example.cloudflareaccess.com \
+            -e THORSYNC_CF_AUDIENCE_FILE=/run/secrets/cf_audience \
+            -e THORSYNC_ADMIN_EMAIL_FILE=/run/secrets/admin_email \
+            -v "$RUNNER_TEMP/thorsync-secrets:/run/secrets:ro" \
+            thorsync:test
+      - name: Wait for liveness
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/health/live >/dev/null; then
+              exit 0
+            fi
+            if ! docker inspect -f '{{.State.Running}}' thorsync-smoke | grep -q true; then
+              docker logs thorsync-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+          docker logs thorsync-smoke
+          exit 1
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs thorsync-smoke || true
+      - name: Remove smoke container
+        if: always()
+        run: docker rm -f thorsync-smoke || true

@@ -1,0 +1,229 @@
+name: thorsync
+
+services:
+  thorsync:
+    image: "${THORSYNC_IMAGE:-ghcr.io/apgul/thorsync:edge}"
+    pull_policy: always
+    container_name: thorsync
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    environment:
+      TZ: "${TZ:-Europe/London}"
+      THORSYNC_LISTEN_ADDR: ":8080"
+      THORSYNC_DATA_DIR: /var/lib/thorsync/data
+      THORSYNC_ARCHIVE_DIR: /var/lib/thorsync/archive
+      THORSYNC_THOR_DIR: /var/lib/thorsync/sync/thor
+      THORSYNC_WINDOWS_DIR: /var/lib/thorsync/sync/windows
+      THORSYNC_SYNCTHING_URL: http://syncthing:8384
+      THORSYNC_SYNCTHING_API_KEY_FILE: /run/secrets/syncthing_api_key
+      THORSYNC_SYNCTHING_THOR_FOLDER_ID: thorsync-thor
+      THORSYNC_SYNCTHING_WINDOWS_FOLDER_ID: thorsync-windows
+      THORSYNC_AUTH_MODE: cloudflare
+      THORSYNC_CF_ISSUER: "${THORSYNC_CF_ISSUER:-https://CHANGE_ME.cloudflareaccess.com}"
+      THORSYNC_CF_AUDIENCE_FILE: /run/secrets/cf_audience
+      THORSYNC_CF_JWKS_URL: "${THORSYNC_CF_JWKS_URL:-}"
+      THORSYNC_ADMIN_EMAIL_FILE: /run/secrets/admin_email
+      THORSYNC_SOFT_QUOTA_BYTES: "${THORSYNC_SOFT_QUOTA_BYTES:-5368709120}"
+      THORSYNC_RESERVE_BYTES: "${THORSYNC_RESERVE_BYTES:-1073741824}"
+      THORSYNC_RECONCILE_INTERVAL: "${THORSYNC_RECONCILE_INTERVAL:-15m}"
+    secrets:
+      - source: syncthing_api_key
+        target: syncthing_api_key
+        uid: "${PUID:-1000}"
+        gid: "${PGID:-1000}"
+        mode: 0600
+      - source: cf_audience
+        target: cf_audience
+        uid: "${PUID:-1000}"
+        gid: "${PGID:-1000}"
+        mode: 0600
+      - source: admin_email
+        target: admin_email
+        uid: "${PUID:-1000}"
+        gid: "${PGID:-1000}"
+        mode: 0600
+    volumes:
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/data"
+        target: /var/lib/thorsync/data
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/archive"
+        target: /var/lib/thorsync/archive
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/sync/thor"
+        target: /var/lib/thorsync/sync/thor
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/sync/windows"
+        target: /var/lib/thorsync/sync/windows
+    ports:
+      - name: web
+        target: 8080
+        published: "${THORSYNC_PORT:-8080}"
+        host_ip: "${THORSYNC_BIND_ADDRESS:-127.0.0.1}"
+        protocol: tcp
+    networks:
+      - private
+      - cloudflare
+    depends_on:
+      syncthing:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health/live"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 30s
+    labels:
+      wud.watch: "true"
+      wud.watch.digest: "true"
+      wud.trigger.include: docker.thorsync
+
+  syncthing:
+    image: "syncthing/syncthing:${SYNCTHING_VERSION:-2.1.5}"
+    container_name: thorsync-syncthing
+    hostname: thorsync-hub
+    restart: unless-stopped
+    init: true
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "0077"
+      TZ: "${TZ:-Europe/London}"
+      STGUIADDRESS: 0.0.0.0:8384
+      STNOUPGRADE: "true"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        export STGUIAPIKEY="$$(cat /run/secrets/syncthing_api_key)"
+        exec /bin/entrypoint.sh /bin/syncthing "$$@"
+      - --
+    secrets:
+      - source: syncthing_api_key
+        target: syncthing_api_key
+        uid: "${PUID:-1000}"
+        gid: "${PGID:-1000}"
+        mode: 0600
+    volumes:
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/syncthing"
+        target: /var/syncthing
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/sync/thor"
+        target: /var/syncthing/sync/thor
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/sync/windows"
+        target: /var/syncthing/sync/windows
+    ports:
+      - name: gui
+        target: 8384
+        published: "${SYNCTHING_GUI_PORT:-8384}"
+        host_ip: "${SYNCTHING_GUI_BIND_ADDRESS:-127.0.0.1}"
+        protocol: tcp
+      - name: sync-tcp
+        target: 22000
+        published: "${SYNCTHING_SYNC_PORT:-22000}"
+        protocol: tcp
+      - name: sync-quic
+        target: 22000
+        published: "${SYNCTHING_SYNC_PORT:-22000}"
+        protocol: udp
+      - name: discovery
+        target: 21027
+        published: "${SYNCTHING_DISCOVERY_PORT:-21027}"
+        protocol: udp
+    networks:
+      - private
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:8384/rest/noauth/health | grep -q 'OK'
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    stop_grace_period: 1m
+    labels:
+      wud.watch: "false"
+
+  wud:
+    image: "getwud/wud:${WUD_VERSION:-8.4.0}"
+    container_name: thorsync-wud
+    restart: unless-stopped
+    environment:
+      TZ: "${TZ:-Europe/London}"
+      WUD_LOG_LEVEL: "${WUD_LOG_LEVEL:-info}"
+      WUD_SERVER_ENABLED: "false"
+      WUD_WATCHER_LOCAL_SOCKET: /var/run/docker.sock
+      WUD_WATCHER_LOCAL_CRON: "*/5 * * * *"
+      WUD_WATCHER_LOCAL_WATCHATSTART: "true"
+      WUD_WATCHER_LOCAL_WATCHEVENTS: "false"
+      WUD_WATCHER_LOCAL_WATCHBYDEFAULT: "false"
+      WUD_TRIGGER_DOCKER_THORSYNC_AUTO: "true"
+      WUD_TRIGGER_DOCKER_THORSYNC_INCLUDEBYDEFAULT: "false"
+      WUD_TRIGGER_DOCKER_THORSYNC_PRUNE: "false"
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/wud"
+        target: /store
+    networks:
+      - updater
+    labels:
+      wud.watch: "false"
+
+networks:
+  private:
+    name: "${COMPOSE_PROJECT_NAME:-thorsync}-private"
+    driver: bridge
+  updater:
+    name: "${COMPOSE_PROJECT_NAME:-thorsync}-updater"
+    driver: bridge
+  cloudflare:
+    name: "${CLOUDFLARE_NETWORK:-thorsync-cloudflare}"
+    external: true
+
+secrets:
+  syncthing_api_key:
+    file: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/secrets/syncthing_api_key"
+  cf_audience:
+    file: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/secrets/cf_audience"
+  admin_email:
+    file: "${THORSYNC_ROOT:-/DATA/AppData/thorsync}/secrets/admin_email"
+
+x-casaos:
+  id: io.github.apgul.thorsync
+  main: thorsync
+  index: /
+  port_map: "${THORSYNC_PORT:-8080}"
+  scheme: http
+  icon: https://raw.githubusercontent.com/apgul/thorsync/main/docs/assets/icon.svg
+  title:
+    en_US: ThorSync
+  tagline:
+    en_US: Visual save history and safe synchronization for GBA and NDS games.
+  description:
+    en_US: ThorSync archives, attributes, and brokers game saves between an AYN Thor and a Windows PC through isolated Syncthing folders.
+  tips:
+    before_install:
+      en_US: Create the external Cloudflare network and the three secret files before starting the stack. See docs/zimaos-deployment.md.
+  author: ThorSync contributors
+  developer: ThorSync contributors
+  category: Others
+  architectures:
+    - amd64
+  version: "0.1.0"
+  update_at: "2026-09-20"
+  release_notes:
+    en_US: Initial ThorSync deployment stack.

@@ -1,0 +1,93 @@
+name: Quality gates
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go and frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Go tests (includes migration and archive integrity suites)
+        run: go test -race -count=1 ./...
+      - name: Go vet
+        run: go vet ./...
+      - name: Frontend tests and build
+        working-directory: web
+        run: |
+          npm ci
+          npm test --if-present
+          npm run build
+      - name: Install Playwright browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Browser acceptance flows
+        working-directory: web
+        run: npm run test:e2e
+
+  deployment:
+    name: Compose and container health
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate ZimaOS Compose
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          test "$(docker compose config --format json | jq -r '.["x-casaos"].main')" = "thorsync"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: thorsync:gate
+          cache-from: type=gha
+      - name: Smoke-test liveness
+        shell: bash
+        run: |
+          secret_dir="$RUNNER_TEMP/thorsync-secrets"
+          mkdir -p "$secret_dir"
+          printf '%s' test-api-key > "$secret_dir/syncthing_api_key"
+          printf '%s' test-audience > "$secret_dir/cf_audience"
+          printf '%s' admin@example.com > "$secret_dir/admin_email"
+          docker run -d --name thorsync-gate \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --tmpfs /var/lib/thorsync:rw,uid=65532,gid=65532 \
+            -p 127.0.0.1:18080:8080 \
+            -e THORSYNC_LISTEN_ADDR=:8080 \
+            -e THORSYNC_DATA_DIR=/var/lib/thorsync/data \
+            -e THORSYNC_ARCHIVE_DIR=/var/lib/thorsync/archive \
+            -e THORSYNC_THOR_DIR=/var/lib/thorsync/sync/thor \
+            -e THORSYNC_WINDOWS_DIR=/var/lib/thorsync/sync/windows \
+            -e THORSYNC_SYNCTHING_URL=http://127.0.0.1:9 \
+            -e THORSYNC_SYNCTHING_API_KEY_FILE=/run/secrets/syncthing_api_key \
+            -e THORSYNC_AUTH_MODE=cloudflare \
+            -e THORSYNC_CF_ISSUER=https://example.cloudflareaccess.com \
+            -e THORSYNC_CF_AUDIENCE_FILE=/run/secrets/cf_audience \
+            -e THORSYNC_ADMIN_EMAIL_FILE=/run/secrets/admin_email \
+            -v "$secret_dir:/run/secrets:ro" \
+            thorsync:gate
+          trap 'docker logs thorsync-gate || true; docker rm -f thorsync-gate || true' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:18080/health/live >/dev/null && exit 0
+            docker inspect -f '{{.State.Running}}' thorsync-gate | grep -q true || exit 1
+            sleep 1
+          done
+          exit 1

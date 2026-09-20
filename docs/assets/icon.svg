@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
+  <title id="title">ThorSync</title>
+  <desc id="description">A handheld game console surrounded by synchronization arrows</desc>
+  <defs>
+    <linearGradient id="background" x1="32" y1="24" x2="224" y2="232" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6256E8"/>
+      <stop offset="1" stop-color="#22B8A7"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="54" fill="#111525"/>
+  <path d="M59 73a85 85 0 0 1 125-15l9-15 17 43-46-3 16-11A66 66 0 0 0 78 84Z" fill="#74E8D5"/>
+  <path d="M197 183a85 85 0 0 1-125 15l-9 15-17-43 46 3-16 11a66 66 0 0 0 102-12Z" fill="#A69DFF"/>
+  <rect x="48" y="83" width="160" height="90" rx="27" fill="url(#background)" stroke="#F7F8FF" stroke-width="6"/>
+  <rect x="91" y="103" width="74" height="50" rx="8" fill="#111525" stroke="#F7F8FF" stroke-width="4"/>
+  <path d="M69 119v22M58 130h22" stroke="#F7F8FF" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="187" cy="118" r="7" fill="#F7F8FF"/>
+  <circle cx="177" cy="139" r="7" fill="#F7F8FF"/>
+</svg>
