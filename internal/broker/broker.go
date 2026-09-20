@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -198,8 +199,11 @@ func stableFile(ctx context.Context, path string) (os.FileInfo, error) {
 }
 
 func cleanRelative(path string) (string, error) {
-	path = filepath.ToSlash(strings.TrimSpace(path))
-	clean := filepath.ToSlash(filepath.Clean(path))
+	// Normalize both separator styles before validation. Syncthing normally
+	// reports slash-separated paths, but accepting a Windows-style backslash
+	// here would let a UNC path bypass the Linux runner's filepath checks.
+	path = strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
+	clean := pathpkg.Clean(path)
 	drivePath := len(clean) >= 2 && ((clean[0] >= 'A' && clean[0] <= 'Z') || (clean[0] >= 'a' && clean[0] <= 'z')) && clean[1] == ':'
 	if clean == "" || clean == "." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") || drivePath || filepath.IsAbs(filepath.FromSlash(clean)) || strings.ContainsRune(clean, '\x00') {
 		return "", errors.New("unsafe relative path")

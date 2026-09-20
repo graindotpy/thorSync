@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -242,8 +243,8 @@ func (s *Store) UpsertBinding(ctx context.Context, binding model.SaveBinding) (m
 }
 
 func cleanRelative(path string) (string, error) {
-	path = filepath.ToSlash(strings.TrimSpace(path))
-	clean := filepath.ToSlash(filepath.Clean(path))
+	path = strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
+	clean := pathpkg.Clean(path)
 	drivePath := len(clean) >= 2 && ((clean[0] >= 'A' && clean[0] <= 'Z') || (clean[0] >= 'a' && clean[0] <= 'z')) && clean[1] == ':'
 	if clean == "." || clean == "" || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") || drivePath || filepath.IsAbs(filepath.FromSlash(clean)) || strings.Contains(clean, "\x00") {
 		return "", errors.New("path must be a safe relative path")
