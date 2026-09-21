@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/apgul/thorsync/internal/ids"
 )
@@ -17,6 +19,7 @@ type Archive struct {
 	root      string
 	softQuota int64
 	reserve   int64
+	mu        sync.Mutex
 }
 
 type Blob struct {
@@ -43,20 +46,101 @@ func (a *Archive) Ensure() error {
 }
 
 func (a *Archive) PutFile(source string) (Blob, error) {
-	if err := a.Ensure(); err != nil {
-		return Blob{}, err
-	}
-	capacity, err := a.Capacity()
-	if err == nil && capacity.FreeBytes <= uint64(a.reserve) {
-		return Blob{}, fmt.Errorf("archive free-space reserve reached")
-	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	in, err := os.Open(source)
 	if err != nil {
 		return Blob{}, err
 	}
 	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return Blob{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return Blob{}, errors.New("archive source is not a regular file")
+	}
+	if err := a.prepareWriteLocked(info.Size()); err != nil {
+		return Blob{}, err
+	}
+	validateUnchanged := func() error {
+		final, statErr := in.Stat()
+		if statErr != nil {
+			return statErr
+		}
+		if !final.Mode().IsRegular() || final.Size() != info.Size() || !final.ModTime().Equal(info.ModTime()) {
+			return errors.New("archive source changed while it was being read")
+		}
+		return nil
+	}
+	return a.putReader(io.LimitReader(in, info.Size()+1), info.Size(), validateUnchanged)
+}
 
+// PutBytes stores data as an immutable content-addressed archive object.
+func (a *Archive) PutBytes(data []byte) (Blob, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.prepareWriteLocked(int64(len(data))); err != nil {
+		return Blob{}, err
+	}
+	return a.putReader(bytes.NewReader(data), int64(len(data)), nil)
+}
+
+// PutReader accepts bounded save data whose size is not known by the caller.
+// Buffering it first lets the reserve check account for the complete write.
+func (a *Archive) PutReader(reader io.Reader) (Blob, error) {
+	if reader == nil {
+		return Blob{}, errors.New("archive reader is nil")
+	}
+	const maxSaveBytes = 16 * 1024 * 1024
+	var buffered bytes.Buffer
+	if _, err := io.Copy(&buffered, io.LimitReader(reader, maxSaveBytes+1)); err != nil {
+		return Blob{}, err
+	}
+	if buffered.Len() > maxSaveBytes {
+		return Blob{}, errors.New("save exceeds 16 MiB safety limit")
+	}
+	return a.PutBytes(buffered.Bytes())
+}
+
+// prepareWriteLocked must be called while a.mu is held so multiple captures
+// cannot each pass the reserve check and collectively consume protected space.
+func (a *Archive) prepareWriteLocked(required int64) error {
+	if err := a.Ensure(); err != nil {
+		return err
+	}
+	capacity, err := a.Capacity()
+	if err != nil {
+		return fmt.Errorf("measure archive capacity: %w", err)
+	}
+	if !reserveAllows(capacity.FreeBytes, a.reserve, required) {
+		if capacity.FreeBytes <= uint64(max64(a.reserve, 0)) {
+			return errors.New("archive free-space reserve reached")
+		}
+		return errors.New("archive write would cross free-space reserve")
+	}
+	return nil
+}
+
+func reserveAllows(free uint64, reserve, required int64) bool {
+	if reserve < 0 {
+		reserve = 0
+	}
+	if required < 0 || free <= uint64(reserve) {
+		return false
+	}
+	return uint64(required) <= free-uint64(reserve)
+}
+
+func max64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func (a *Archive) putReader(reader io.Reader, expectedSize int64, validate func() error) (Blob, error) {
 	tmpDir := filepath.Join(a.root, "tmp")
 	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
 		return Blob{}, err
@@ -75,12 +159,20 @@ func (a *Archive) PutFile(source string) (Blob, error) {
 	}()
 
 	hash := sha256.New()
-	size, err := io.Copy(io.MultiWriter(out, hash), in)
+	size, err := io.Copy(io.MultiWriter(out, hash), reader)
 	if err != nil {
 		return Blob{}, err
 	}
 	if size == 0 {
 		return Blob{}, errors.New("refusing to archive zero-byte save")
+	}
+	if expectedSize >= 0 && size != expectedSize {
+		return Blob{}, fmt.Errorf("archive source changed size while being read: read %d of %d bytes", size, expectedSize)
+	}
+	if validate != nil {
+		if err := validate(); err != nil {
+			return Blob{}, err
+		}
 	}
 	if err := out.Sync(); err != nil {
 		return Blob{}, err
@@ -104,10 +196,38 @@ func (a *Archive) PutFile(source string) (Blob, error) {
 		return Blob{}, err
 	}
 	removeTmp = false
-	if err := syncDir(filepath.Dir(destination)); err != nil {
+	if err := syncDirTree(filepath.Dir(destination), a.root); err != nil {
 		return Blob{}, err
 	}
 	return Blob{Hash: digest, Size: size, Path: destination}, nil
+}
+
+func syncDirTree(start, stop string) error {
+	current, err := filepath.Abs(start)
+	if err != nil {
+		return err
+	}
+	stop, err = filepath.Abs(stop)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(stop, current)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return errors.New("archive directory escaped its root")
+	}
+	for {
+		if err := syncDir(current); err != nil {
+			return err
+		}
+		if current == stop {
+			return nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return errors.New("archive directory escaped its root")
+		}
+		current = parent
+	}
 }
 
 func (a *Archive) Path(hash string) string {

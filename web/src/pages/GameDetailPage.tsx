@@ -9,6 +9,7 @@ import {
   FileArchive,
   History,
   Monitor,
+  Pencil,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
@@ -19,9 +20,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { DeliveryBadge } from '../components/StatusBadge'
 import { Modal } from '../components/Modal'
 import { PlatformArt } from '../components/PlatformArt'
-import { createIdempotencyKey, createManualSnapshot, loadGame, restoreRevision, uploadArtwork } from '../lib/api'
+import { createIdempotencyKey, createManualSnapshot, loadGame, mapSaveToGame, restoreRevision, uploadArtwork } from '../lib/api'
 import { fileSize, fullDate, sentenceCase, timeAgo } from '../lib/format'
-import type { GameDetail, Revision } from '../types'
+import type { GameDetail, Revision, SaveBinding, WindowsGbaProfileId } from '../types'
 
 interface GameDetailPageProps {
   gameId: string
@@ -39,6 +40,11 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
   const [notice, setNotice] = useState<string | null>(null)
   const [uploadingArt, setUploadingArt] = useState(false)
 	const [snapshotting, setSnapshotting] = useState(false)
+  const [profileBinding, setProfileBinding] = useState<SaveBinding | null>(null)
+  const [selectedProfileId, setSelectedProfileId] = useState<WindowsGbaProfileId>('windows-mgba')
+  const [profileAcknowledged, setProfileAcknowledged] = useState(false)
+  const [updatingProfile, setUpdatingProfile] = useState(false)
+  const [profileError, setProfileError] = useState<string | null>(null)
 
   const fetchGame = useCallback(async () => {
     setLoading(true)
@@ -102,6 +108,52 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
 			setSnapshotting(false)
 		}
 	}
+
+  const editProfile = (binding: SaveBinding) => {
+    setProfileBinding(binding)
+    setSelectedProfileId(binding.profileId === 'windows-vbam' ? 'windows-vbam' : 'windows-mgba')
+    setProfileAcknowledged(false)
+    setProfileError(null)
+  }
+
+  const closeProfileEditor = () => {
+    if (updatingProfile) return
+    setProfileBinding(null)
+    setProfileAcknowledged(false)
+    setProfileError(null)
+  }
+
+  const confirmProfileChange = async () => {
+    if (!game || !profileBinding || !profileAcknowledged || selectedProfileId === profileBinding.profileId) return
+    setUpdatingProfile(true)
+    setProfileError(null)
+    try {
+      if (!demoMode) {
+        await mapSaveToGame(game.id, profileBinding.endpointId as 'windows', selectedProfileId, profileBinding.relativePath, true)
+        setProfileBinding(null)
+        setProfileAcknowledged(false)
+        await fetchGame()
+      } else {
+        setGame((current) => current ? {
+          ...current,
+          bindings: current.bindings.map((binding) => binding.id === profileBinding.id ? {
+            ...binding,
+            profileId: selectedProfileId,
+            profileName: selectedProfileId === 'windows-mgba' ? 'Standalone mGBA' : 'VBA-M',
+            format: selectedProfileId === 'windows-mgba' ? 'raw-battery+opaque-rtc' : 'raw-battery',
+          } : binding),
+        } : current)
+        setProfileBinding(null)
+        setProfileAcknowledged(false)
+      }
+      setNotice(`Windows profile changed to ${selectedProfileId === 'windows-mgba' ? 'Standalone mGBA' : 'VBA-M'}; the save path and delivery baseline were kept.`)
+      window.setTimeout(() => setNotice(null), 4_000)
+    } catch (cause) {
+      setProfileError(cause instanceof Error ? cause.message : 'Could not change this game’s Windows emulator')
+    } finally {
+      setUpdatingProfile(false)
+    }
+  }
 
   if (loading) return <GameDetailSkeleton />
 
@@ -204,9 +256,13 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
                   <div>
                     <strong>{binding.endpointName}</strong>
                     <code>{binding.relativePath}</code>
+                    <small>{binding.profileName}{binding.hasRtc ? ' · RTC preserved' : ''}</small>
                     <small>{binding.lastDeliveredAt ? `Delivered ${timeAgo(binding.lastDeliveredAt)}` : 'No copy found'}</small>
                   </div>
-                  <DeliveryBadge state={binding.deliveryState} />
+                  <div className="binding__actions">
+                    <DeliveryBadge state={binding.deliveryState} />
+                    {game.platform === 'GBA' && binding.endpointId === 'windows' && <button type="button" className="text-button" onClick={() => editProfile(binding)}><Pencil size={12} />Change profile</button>}
+                  </div>
                 </div>
               ))}
             </div>
@@ -218,6 +274,38 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
           </section>
         </aside>
       </div>
+
+      <Modal
+        open={Boolean(profileBinding)}
+        title="Change this game’s Windows emulator?"
+        description="This overrides the Windows GBA default for this game only. ThorSync keeps the existing save path and delivery baseline."
+        onClose={closeProfileEditor}
+        footer={
+          <>
+            <button type="button" className="button button--quiet" onClick={closeProfileEditor} disabled={updatingProfile}>Cancel</button>
+            <button type="button" className="button button--primary" disabled={!profileAcknowledged || updatingProfile || selectedProfileId === profileBinding?.profileId} onClick={() => void confirmProfileChange()}>
+              {updatingProfile ? <RefreshCw size={16} className="spin-slow" /> : <CheckCircle2 size={16} />}
+              {updatingProfile ? 'Updating…' : 'Update profile'}
+            </button>
+          </>
+        }
+      >
+        {profileBinding && <>
+          <div className="emulator-options binding-profile-options" role="radiogroup" aria-label="Windows GBA emulator for this game">
+            <label className={selectedProfileId === 'windows-mgba' ? 'selected' : ''}><input type="radio" name="game-windows-gba-profile" value="windows-mgba" checked={selectedProfileId === 'windows-mgba'} onChange={() => setSelectedProfileId('windows-mgba')} /><span><strong>Standalone mGBA</strong><small>Preserves its optional 16-byte RTC footer.</small></span></label>
+            <label className={selectedProfileId === 'windows-vbam' ? 'selected' : ''}><input type="radio" name="game-windows-gba-profile" value="windows-vbam" checked={selectedProfileId === 'windows-vbam'} onChange={() => setSelectedProfileId('windows-vbam')} /><span><strong>VBA-M</strong><small>Materializes raw battery-save bytes.</small></span></label>
+          </div>
+          <div className="restore-summary binding-profile-summary">
+            <div><span>Save path</span><code>{profileBinding.relativePath}</code></div>
+            <div><span>Delivery baseline</span><code>{profileBinding.baselineRevisionId ?? 'Not established'}</code></div>
+          </div>
+          <label className="confirm-check">
+            <input type="checkbox" checked={profileAcknowledged} onChange={(event) => setProfileAcknowledged(event.target.checked)} />
+            <span><CheckCircle2 size={19} /><strong>I’ve closed this game in every emulator</strong><small>ThorSync will immediately re-check the existing Windows save with the selected adapter.</small></span>
+          </label>
+          {profileError && <p className="form-error"><AlertTriangle size={14} />{profileError}</p>}
+        </>}
+      </Modal>
 
       <Modal
         open={Boolean(selectedRevision)}

@@ -3,6 +3,7 @@ import type {
   ArchiveUsage,
   Conflict,
   DiagnosticCheck,
+  EmulatorProfile,
   Endpoint,
   Game,
   GameDetail,
@@ -11,6 +12,14 @@ import type {
 
 const now = Date.now()
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString()
+
+export const mockProfiles: EmulatorProfile[] = [
+  { id: 'thor-mgba', name: 'RetroArch mGBA', endpointId: 'thor', platform: 'gba', extension: '.srm', format: 'raw-battery' },
+  { id: 'thor-melonds-ds', name: 'RetroArch melonDS', endpointId: 'thor', platform: 'nds', extension: '.srm', format: 'raw-battery' },
+  { id: 'windows-mgba', name: 'Standalone mGBA', endpointId: 'windows', platform: 'gba', extension: '.sav', format: 'raw-battery+opaque-rtc' },
+  { id: 'windows-vbam', name: 'VBA-M', endpointId: 'windows', platform: 'gba', extension: '.sav', format: 'raw-battery' },
+  { id: 'windows-melonds', name: 'melonDS', endpointId: 'windows', platform: 'nds', extension: '.sav', format: 'raw-battery' },
+]
 
 export const mockEndpoints: Endpoint[] = [
   {
@@ -28,7 +37,7 @@ export const mockEndpoints: Endpoint[] = [
     id: 'windows',
     name: 'Gaming PC',
     kind: 'windows',
-    profile: 'VBA-M / melonDS',
+    profile: 'mGBA / VBA-M / melonDS',
     folder: '/sync/windows',
     status: 'healthy',
     lastSeenAt: ago(7),
@@ -43,7 +52,7 @@ export const mockGames: Game[] = [
     title: 'Luma Isles',
     platform: 'GBA',
     saveName: 'Luma Isles.sav',
-    emulator: 'mGBA ↔ VBA-M',
+    emulator: 'RetroArch mGBA ↔ standalone mGBA',
     updatedAt: ago(18),
     sourceDeviceId: 'thor',
     sourceDeviceName: 'AYN Thor',
@@ -200,6 +209,10 @@ export const getMockGameDetail = (gameId: string): GameDetail | undefined => {
           ? 'missing'
           : game.deliveryState,
       lastDeliveredAt: game.deliveryState === 'missing' ? null : game.updatedAt,
+      profileId: endpoint.kind === 'thor' ? (game.platform === 'GBA' ? 'thor-mgba' : 'thor-melonds-ds') : (game.platform === 'GBA' ? 'windows-mgba' : 'windows-melonds'),
+      profileName: endpoint.kind === 'thor' ? (game.platform === 'GBA' ? 'RetroArch mGBA' : 'RetroArch melonDS') : (game.platform === 'GBA' ? 'Standalone mGBA' : 'melonDS'),
+      format: game.platform === 'GBA' && endpoint.kind !== 'thor' ? 'mgba-rtc16' : 'raw-battery',
+      hasRtc: game.platform === 'GBA' && endpoint.kind !== 'thor',
     })),
   }
 }

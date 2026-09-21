@@ -52,9 +52,9 @@ export function App() {
     if (path === '/activity') return <ActivityPage items={data.activity} navigate={navigate} />
     if (path === '/conflicts') return <ConflictsPage conflicts={data.conflicts} demoMode={isDemo} navigate={navigate} />
     if (path === '/devices') return <DevicesPage endpoints={data.endpoints} navigate={navigate} onRefresh={refresh} />
-    if (path === '/unassigned') return <UnassignedPage files={data.unassigned} games={data.games} onMapped={refresh} navigate={navigate} />
+    if (path === '/unassigned') return <UnassignedPage files={data.unassigned} games={data.games} profiles={data.profiles} onMapped={refresh} navigate={navigate} />
     if (path === '/diagnostics') return <DiagnosticsPage checks={data.diagnostics} archive={data.archive} onRefresh={refresh} />
-    if (path === '/settings') return <SettingsPage propagationEnabled={data.onboarding.propagationEnabled} quotaBytes={data.archive.quotaBytes} onSaved={refresh} />
+    if (path === '/settings') return <SettingsPage propagationEnabled={data.onboarding.propagationEnabled} quotaBytes={data.archive.quotaBytes} emulatorSettings={data.emulatorSettings} onSaved={refresh} />
     if (path.startsWith('/games/')) {
       const gameId = decodeURIComponent(path.slice('/games/'.length))
       return <GameDetailPage gameId={gameId} navigate={navigate} demoMode={isDemo} />

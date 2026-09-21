@@ -75,6 +75,8 @@ type Revision struct {
 	PromotedFromID   string     `json:"promotedFromId,omitempty"`
 	BlobHash         string     `json:"blobHash"`
 	Size             int64      `json:"size"`
+	ContentHash      string     `json:"contentHash"`
+	HasRTC           bool       `json:"hasRtc"`
 	SourceEndpointID string     `json:"sourceEndpointId,omitempty"`
 	SourceModifiedAt *time.Time `json:"sourceModifiedAt,omitempty"`
 	ObservedAt       time.Time  `json:"observedAt"`
@@ -82,6 +84,19 @@ type Revision struct {
 	Kind             string     `json:"kind"`
 	State            string     `json:"state"`
 	Actor            string     `json:"actor,omitempty"`
+}
+
+// RevisionPayload describes the emulator-independent content carried by a
+// revision. BatteryBlobHash is always present. RTCBlobHash is optional because
+// most profiles store only battery-backed RAM, while profiles such as mGBA can
+// preserve the real-time clock alongside it.
+type RevisionPayload struct {
+	RevisionID      string `json:"revisionId"`
+	BatteryBlobHash string `json:"batteryBlobHash"`
+	BatterySize     int64  `json:"batterySize"`
+	RTCBlobHash     string `json:"rtcBlobHash,omitempty"`
+	RTCSize         int64  `json:"rtcSize,omitempty"`
+	ContentHash     string `json:"contentHash"`
 }
 
 type Observation struct {
@@ -115,11 +130,21 @@ type BrokerOperation struct {
 	RevisionID       string    `json:"revisionId"`
 	TargetEndpointID string    `json:"targetEndpointId"`
 	RelativePath     string    `json:"relativePath"`
+	ProfileID        string    `json:"profileId,omitempty"`
 	BlobHash         string    `json:"blobHash"`
 	State            string    `json:"state"`
 	Error            string    `json:"error,omitempty"`
 	CreatedAt        time.Time `json:"createdAt"`
 	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+// EmulatorSettings contains the persisted emulator choices which affect how
+// save payloads are decoded and materialized. AffectedBindings is informational
+// and lets callers offer an explicit migration before changing existing games.
+type EmulatorSettings struct {
+	WindowsGBAProfileID  string `json:"windowsGbaProfileId"`
+	WindowsGBAConfigured bool   `json:"windowsGbaConfigured"`
+	AffectedBindings     int    `json:"affectedBindings"`
 }
 
 type GameDetail struct {

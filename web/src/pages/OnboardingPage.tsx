@@ -25,10 +25,11 @@ import {
   completeOnboarding,
   configureSyncthingFolders,
   importPlaylist,
+  setWindowsGbaProfile,
   submitRomHashes,
   type RomHashRecord,
 } from '../lib/api'
-import type { Endpoint } from '../types'
+import type { Endpoint, WindowsGbaProfileId } from '../types'
 
 interface OnboardingPageProps {
   endpoints: Endpoint[]
@@ -56,6 +57,8 @@ export function OnboardingPage({ endpoints, demoMode, navigate }: OnboardingPage
   const [enableDelivery, setEnableDelivery] = useState(true)
   const [thorDeviceId, setThorDeviceId] = useState('')
   const [windowsDeviceId, setWindowsDeviceId] = useState('')
+  const [windowsGbaProfile, setWindowsGbaProfileState] = useState<WindowsGbaProfileId>('windows-mgba')
+  const [emulatorClosed, setEmulatorClosed] = useState(false)
 
   const goNext = async () => {
     if (step < steps.length - 1) {
@@ -69,6 +72,18 @@ export function OnboardingPage({ endpoints, demoMode, navigate }: OnboardingPage
         try { await configureSyncthingFolders(thorDeviceId.trim(), windowsDeviceId.trim()) }
         catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not configure Syncthing folders'); return }
         finally { setBusy(false) }
+      }
+      if (step === 3) {
+        if (!emulatorClosed) {
+          setError('Close all emulators and confirm before selecting the Windows GBA adapter.')
+          return
+        }
+        if (!demoMode) {
+          setBusy(true)
+          try { await setWindowsGbaProfile(windowsGbaProfile, true) }
+          catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not configure the Windows GBA emulator'); return }
+          finally { setBusy(false) }
+        }
       }
       setStep((value) => value + 1)
       return
@@ -156,6 +171,10 @@ export function OnboardingPage({ endpoints, demoMode, navigate }: OnboardingPage
               windowsDeviceId={windowsDeviceId}
               setThorDeviceId={setThorDeviceId}
               setWindowsDeviceId={setWindowsDeviceId}
+              windowsGbaProfile={windowsGbaProfile}
+              setWindowsGbaProfile={setWindowsGbaProfileState}
+              emulatorClosed={emulatorClosed}
+              setEmulatorClosed={setEmulatorClosed}
               onPlaylist={handlePlaylist}
               onRoms={handleRoms}
             />
@@ -184,6 +203,10 @@ interface StepContentProps {
   windowsDeviceId: string
   setThorDeviceId: (value: string) => void
   setWindowsDeviceId: (value: string) => void
+  windowsGbaProfile: WindowsGbaProfileId
+  setWindowsGbaProfile: (value: WindowsGbaProfileId) => void
+  emulatorClosed: boolean
+  setEmulatorClosed: (value: boolean) => void
   onPlaylist: (event: ChangeEvent<HTMLInputElement>) => void
   onRoms: (event: ChangeEvent<HTMLInputElement>) => void
 }
@@ -192,7 +215,7 @@ function StepContent(props: StepContentProps) {
   if (props.step === 0) return <ServerCheck />
   if (props.step === 1) return <PairDevices endpoints={props.endpoints} thorDeviceId={props.thorDeviceId} windowsDeviceId={props.windowsDeviceId} setThorDeviceId={props.setThorDeviceId} setWindowsDeviceId={props.setWindowsDeviceId} />
   if (props.step === 2) return <FolderSetup />
-  if (props.step === 3) return <EmulatorProfiles />
+  if (props.step === 3) return <EmulatorProfiles windowsGbaProfile={props.windowsGbaProfile} setWindowsGbaProfile={props.setWindowsGbaProfile} emulatorClosed={props.emulatorClosed} setEmulatorClosed={props.setEmulatorClosed} />
   if (props.step === 4) return <Inventory />
   if (props.step === 5) return <GameImport {...props} />
   return <SafetyTest enableDelivery={props.enableDelivery} setEnableDelivery={props.setEnableDelivery} />
@@ -216,8 +239,9 @@ function FolderSetup() {
   return <><SetupHeading icon={<HardDrive size={23} />} eyebrow="Isolated folders" title="Keep each endpoint separate" copy="ThorSync watches a dedicated hub folder for each device so .srm and .sav names never collide." /><div className="folder-cards"><div><span><Smartphone size={20} /></span><div><strong>Thor saves</strong><code>/sync/thor</code><small>Device path: Emulation/Saves</small></div><CheckCircle2 size={18} /></div><div><span><Monitor size={20} /></span><div><strong>Windows saves</strong><code>/sync/windows</code><small>Choose your emulator save folder</small></div><CheckCircle2 size={18} /></div></div><div className="inline-note"><FolderCheck size={17} /><p>On Android, use ordinary shared storage. Private app and <code>Android/data</code> folders cannot be accessed reliably.</p></div></>
 }
 
-function EmulatorProfiles() {
-  return <><SetupHeading icon={<Gamepad2 size={23} />} eyebrow="Byte-preserving adapters" title="Confirm your emulator profiles" copy="Adapters map extensions and paths only. Save bytes are never speculatively converted." /><div className="profile-table"><div className="profile-table__head"><span>Platform</span><span>AYN Thor</span><span>Windows</span><span /></div><ProfileRow platform="GBA" thor="RetroArch · mGBA (.srm)" windows="VBA-M (.sav)" /><ProfileRow platform="NDS" thor="RetroArch · melonDS (.srm)" windows="melonDS (.sav)" /></div><div className="inline-note"><ShieldCheck size={17} /><p>Zero-byte, unsupported-size, and unexpected sidecar files are quarantined instead of delivered.</p></div></>
+function EmulatorProfiles({ windowsGbaProfile, setWindowsGbaProfile, emulatorClosed, setEmulatorClosed }: { windowsGbaProfile: WindowsGbaProfileId; setWindowsGbaProfile: (value: WindowsGbaProfileId) => void; emulatorClosed: boolean; setEmulatorClosed: (value: boolean) => void }) {
+  const windowsLabel = windowsGbaProfile === 'windows-mgba' ? 'Standalone mGBA (.sav + RTC)' : 'VBA-M (.sav)'
+  return <><SetupHeading icon={<Gamepad2 size={23} />} eyebrow="Format-aware adapters" title="Choose your Windows GBA emulator" copy="ThorSync keeps mGBA’s RTC state in history while sending RetroArch only the raw battery bytes it supports." /><div className="emulator-options" role="radiogroup" aria-label="Windows GBA emulator"><label className={windowsGbaProfile === 'windows-mgba' ? 'selected' : ''}><input type="radio" checked={windowsGbaProfile === 'windows-mgba'} onChange={() => setWindowsGbaProfile('windows-mgba')} /><span><strong>Standalone mGBA <em>Recommended</em></strong><small>Raw and 16-byte RTC-wrapped saves are handled automatically.</small></span></label><label className={windowsGbaProfile === 'windows-vbam' ? 'selected' : ''}><input type="radio" checked={windowsGbaProfile === 'windows-vbam'} onChange={() => setWindowsGbaProfile('windows-vbam')} /><span><strong>VBA-M</strong><small>Raw battery saves only.</small></span></label></div><div className="profile-table"><div className="profile-table__head"><span>Platform</span><span>AYN Thor</span><span>Windows</span><span /></div><ProfileRow platform="GBA" thor="RetroArch · mGBA (.srm)" windows={windowsLabel} /><ProfileRow platform="NDS" thor="RetroArch · melonDS (.srm)" windows="melonDS (.sav)" /></div><label className="enable-delivery"><input type="checkbox" checked={emulatorClosed} onChange={(event) => setEmulatorClosed(event.target.checked)} /><span><strong>I have closed all emulators</strong><small>ThorSync may immediately re-check existing mapped saves.</small></span></label><div className="inline-note"><ShieldCheck size={17} /><p>The original file and opaque RTC bytes are archived before ThorSync materializes either target format.</p></div></>
 }
 
 function ProfileRow({ platform, thor, windows }: { platform: string; thor: string; windows: string }) {

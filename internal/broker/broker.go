@@ -145,7 +145,37 @@ func (s *Service) Capture(ctx context.Context, input CaptureInput) (store.Ingest
 		_ = s.store.RecordUnassigned(ctx, input.EndpointID, relative, blob, input.SourceModified, time.Now().UTC(), input.Provenance, "Quarantined: "+err.Error())
 		return store.IngestResult{}, err
 	}
-	result, err := s.store.RecordIngest(ctx, store.IngestParams{Binding: binding, Blob: blob, SourceModified: input.SourceModified, ObservedAt: time.Now().UTC(), Provenance: input.Provenance, ForceConflict: forceConflict, ConfirmDelivery: input.ConfirmDelivery, ObservationPath: relative, Detail: input.Detail})
+
+	// The exact physical occurrence is archived first. Only then do we decode
+	// emulator-specific representations into their immutable logical parts.
+	batteryBlob := blob
+	var rtcBlob *archive.Blob
+	if platform == model.PlatformGBA {
+		physical, readErr := s.readBlob(blob)
+		if readErr != nil {
+			_ = s.store.RecordUnassigned(ctx, input.EndpointID, relative, blob, input.SourceModified, time.Now().UTC(), input.Provenance, "Quarantined: "+readErr.Error())
+			return store.IngestResult{}, readErr
+		}
+		decoded, decodeErr := adapter.Decode(binding.ProfileID, platform, relative, physical)
+		if decodeErr != nil {
+			_ = s.store.RecordUnassigned(ctx, input.EndpointID, relative, blob, input.SourceModified, time.Now().UTC(), input.Provenance, "Quarantined: "+decodeErr.Error())
+			return store.IngestResult{}, decodeErr
+		}
+		batteryBlob, err = s.archive.PutBytes(decoded.Battery)
+		if err != nil {
+			_ = s.store.RecordUnassigned(ctx, input.EndpointID, relative, blob, input.SourceModified, time.Now().UTC(), input.Provenance, "Capture paused: "+err.Error())
+			return store.IngestResult{}, err
+		}
+		if len(decoded.RTC) != 0 {
+			rtc, putErr := s.archive.PutBytes(decoded.RTC)
+			if putErr != nil {
+				_ = s.store.RecordUnassigned(ctx, input.EndpointID, relative, blob, input.SourceModified, time.Now().UTC(), input.Provenance, "Capture paused: "+putErr.Error())
+				return store.IngestResult{}, putErr
+			}
+			rtcBlob = &rtc
+		}
+	}
+	result, err := s.store.RecordIngest(ctx, store.IngestParams{Binding: binding, ObservedBlob: blob, BatteryBlob: batteryBlob, RTCBlob: rtcBlob, SourceModified: input.SourceModified, ObservedAt: time.Now().UTC(), Provenance: input.Provenance, ForceConflict: forceConflict, ConfirmDelivery: input.ConfirmDelivery, ObservationPath: relative, Detail: input.Detail})
 	if err != nil {
 		return store.IngestResult{}, err
 	}
@@ -157,6 +187,9 @@ func (s *Service) Capture(ctx context.Context, input CaptureInput) (store.Ingest
 			return result, fmt.Errorf("conflict archived but artifact could not be quarantined: %w", err)
 		}
 	}
+	// A previous quarantine for this exact live path is only resolved after all
+	// bytes are safely archived and the ingest transaction has committed.
+	_ = s.store.ResolveUnassigned(ctx, input.EndpointID, relative)
 	if result.ShouldPropagate {
 		if err := s.PropagateRevision(ctx, result.GameID, result.RevisionID, input.EndpointID); err != nil {
 			s.hub.Publish(events.Event{Type: "propagation-error", GameID: result.GameID, Message: err.Error()})
@@ -165,6 +198,25 @@ func (s *Service) Capture(ctx context.Context, input CaptureInput) (store.Ingest
 	}
 	s.hub.Publish(events.Event{Type: "revision", GameID: result.GameID, Message: "Save revision captured"})
 	return result, nil
+}
+
+func (s *Service) readBlob(blob archive.Blob) ([]byte, error) {
+	if blob.Size <= 0 || blob.Size > 16*1024*1024 {
+		return nil, fmt.Errorf("invalid archived save size: %d bytes", blob.Size)
+	}
+	reader, err := s.archive.Open(blob.Hash)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(io.LimitReader(reader, blob.Size+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) != blob.Size {
+		return nil, fmt.Errorf("archive object size changed: read %d of %d bytes", len(data), blob.Size)
+	}
+	return data, nil
 }
 
 func stableFile(ctx context.Context, path string) (os.FileInfo, error) {
@@ -245,28 +297,118 @@ func (s *Service) PropagateRevision(ctx context.Context, gameID, revisionID, sou
 		if !binding.Enabled || binding.EndpointID == sourceEndpoint || binding.LastDeployedRevisionID == revisionID {
 			continue
 		}
-		if err := adapter.Validate(binding.ProfileID, platform, binding.RelativePath, revision.Size); err != nil {
-			return fmt.Errorf("target %s: %w", binding.EndpointID, err)
-		}
-		op, err := s.store.CreateOperation(ctx, gameID, revisionID, binding.EndpointID, binding.RelativePath, revision.BlobHash)
-		if err != nil {
-			return err
-		}
-		if op.State == "delivered" || op.State == "written" || op.State == "superseded" {
-			continue
-		}
-		if err := s.writeTarget(ctx, binding, revision); err != nil {
-			_ = s.store.UpdateOperation(ctx, op.ID, "failed", err.Error())
-			return err
-		}
-		if err := s.store.UpdateOperation(ctx, op.ID, "written", ""); err != nil {
+		if err := s.deliverRevisionToBinding(ctx, binding, platform, revision.ID, false); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Service) writeTarget(ctx context.Context, binding model.SaveBinding, revision model.Revision) error {
+// RematerializeBinding applies the current immutable head using a binding's
+// newly selected profile even when that binding already has the same logical
+// revision as its baseline. This is used for explicit, emulator-closed profile
+// changes such as mGBA -> VBA-M and never rewinds history.
+func (s *Service) RematerializeBinding(ctx context.Context, binding model.SaveBinding) error {
+	if err := s.store.AssertNoOpenConflict(ctx, binding.GameID); err != nil {
+		return err
+	}
+	detail, err := s.store.GetGame(ctx, binding.GameID)
+	if err != nil {
+		return err
+	}
+	if detail.CurrentRevisionID == "" {
+		return nil
+	}
+	return s.deliverRevisionToBinding(ctx, binding, detail.Platform, detail.CurrentRevisionID, true)
+}
+
+func (s *Service) deliverRevisionToBinding(ctx context.Context, binding model.SaveBinding, platform model.Platform, revisionID string, force bool) error {
+	materialized, err := s.materializeRevision(ctx, binding, platform, revisionID)
+	if err != nil {
+		return fmt.Errorf("target %s: %w", binding.EndpointID, err)
+	}
+	materializedBlob, err := s.archive.PutBytes(materialized)
+	if err != nil {
+		return err
+	}
+	op, err := s.store.CreateOperation(ctx, binding.GameID, revisionID, binding.EndpointID, binding.RelativePath, binding.ProfileID, materializedBlob)
+	if err != nil {
+		return err
+	}
+	if !force && (op.State == "delivered" || op.State == "written" || op.State == "superseded") {
+		return nil
+	}
+	matches, err := s.targetMatches(ctx, binding, materializedBlob)
+	if err != nil {
+		return err
+	}
+	if matches {
+		// The desired representation is already on the hub, so avoid an
+		// unnecessary rewrite. It may still be an offline device with an
+		// unannounced edit, or this may be recovery after a crash between the
+		// rename and journal update. Leave the operation written until a live
+		// Syncthing completion check confirms the remote copy.
+		return s.store.UpdateOperation(ctx, op.ID, "written", "")
+	}
+	if err := s.writeTarget(ctx, binding, materializedBlob); err != nil {
+		_ = s.store.UpdateOperation(ctx, op.ID, "failed", err.Error())
+		return err
+	}
+	return s.store.UpdateOperation(ctx, op.ID, "written", "")
+}
+
+func (s *Service) materializeRevision(ctx context.Context, binding model.SaveBinding, platform model.Platform, revisionID string) ([]byte, error) {
+	payload, err := s.store.RevisionPayload(ctx, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	battery, err := s.readBlob(archive.Blob{Hash: payload.BatteryBlobHash, Size: payload.BatterySize})
+	if err != nil {
+		return nil, err
+	}
+	if platform != model.PlatformGBA {
+		if err := adapter.Validate(binding.ProfileID, platform, binding.RelativePath, int64(len(battery))); err != nil {
+			return nil, err
+		}
+		return battery, nil
+	}
+	var rtc []byte
+	if payload.RTCBlobHash != "" {
+		rtc, err = s.readBlob(archive.Blob{Hash: payload.RTCBlobHash, Size: payload.RTCSize})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return adapter.Encode(binding.ProfileID, platform, binding.RelativePath, adapter.Save{Battery: battery, RTC: rtc})
+}
+
+func (s *Service) targetMatches(ctx context.Context, binding model.SaveBinding, materialized archive.Blob) (bool, error) {
+	root, err := s.store.RootForEndpoint(ctx, binding.EndpointID)
+	if err != nil {
+		return false, err
+	}
+	target, err := safeJoin(root, binding.RelativePath)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() != materialized.Size {
+		return false, nil
+	}
+	actual, err := s.archive.PutFile(target)
+	if err != nil {
+		return false, err
+	}
+	return actual.Hash == materialized.Hash, nil
+}
+
+func (s *Service) writeTarget(ctx context.Context, binding model.SaveBinding, materialized archive.Blob) error {
 	root, err := s.store.RootForEndpoint(ctx, binding.EndpointID)
 	if err != nil {
 		return err
@@ -278,7 +420,7 @@ func (s *Service) writeTarget(ctx context.Context, binding model.SaveBinding, re
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return err
 	}
-	source, err := s.archive.Open(revision.BlobHash)
+	source, err := s.archive.Open(materialized.Hash)
 	if err != nil {
 		return err
 	}
@@ -299,8 +441,8 @@ func (s *Service) writeTarget(ctx context.Context, binding model.SaveBinding, re
 	if err != nil {
 		return err
 	}
-	if written != revision.Size {
-		return fmt.Errorf("short archive copy: wrote %d of %d bytes", written, revision.Size)
+	if written != materialized.Size {
+		return fmt.Errorf("short archive copy: wrote %d of %d bytes", written, materialized.Size)
 	}
 	if err = output.Sync(); err != nil {
 		return err

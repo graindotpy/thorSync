@@ -216,7 +216,7 @@ func (r *Runner) refreshStatus(ctx context.Context) {
 			if folderStatus, err := r.client.FolderStatus(ctx, cfg.FolderID); err == nil && folderStatus.State != "" {
 				state = folderStatus.State
 			}
-			if endpoint.DeviceID != "" {
+			if connected && endpoint.DeviceID != "" {
 				if completion, err := r.client.Completion(ctx, cfg.FolderID, endpoint.DeviceID); err == nil && completion.RemoteState == "valid" && completion.Completion >= 100 && completion.NeedItems == 0 && completion.NeedDeletes == 0 {
 					if delivered, err := r.store.CompleteEndpointDeliveries(ctx, endpoint.ID); err == nil && delivered > 0 {
 						r.hub.Publish(events.Event{Type: "delivery", Message: "Syncthing confirmed delivery to " + endpoint.ID})

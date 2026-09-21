@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apgul/thorsync/internal/adapter"
 	"github.com/apgul/thorsync/internal/model"
+	"github.com/apgul/thorsync/internal/store"
 )
 
 type gameDTO struct {
@@ -55,6 +57,30 @@ type bindingDTO struct {
 	BaselineRevisionID string     `json:"baselineRevisionId"`
 	DeliveryState      string     `json:"deliveryState"`
 	LastDeliveredAt    *time.Time `json:"lastDeliveredAt"`
+	ProfileID          string     `json:"profileId"`
+	ProfileName        string     `json:"profileName"`
+	Format             string     `json:"format"`
+	HasRTC             bool       `json:"hasRtc"`
+}
+type emulatorSettingsDTO struct {
+	WindowsGBAProfileID string `json:"windowsGbaProfileId"`
+	Configured          bool   `json:"configured"`
+	DetectedProfileID   string `json:"detectedProfileId,omitempty"`
+	AffectedBindings    int    `json:"affectedBindings"`
+}
+type unassignedDTO struct {
+	ID                   string           `json:"id"`
+	EndpointID           string           `json:"endpointId"`
+	RelativePath         string           `json:"relativePath"`
+	BlobHash             string           `json:"blobHash,omitempty"`
+	Size                 int64            `json:"size"`
+	SourceModifiedAt     *time.Time       `json:"sourceModifiedAt,omitempty"`
+	ObservedAt           time.Time        `json:"observedAt"`
+	Provenance           model.Provenance `json:"provenance"`
+	State                string           `json:"state"`
+	Detail               string           `json:"detail,omitempty"`
+	SuggestedProfileID   string           `json:"suggestedProfileId,omitempty"`
+	CompatibleProfileIDs []string         `json:"compatibleProfileIds"`
 }
 type endpointDTO struct {
 	ID           string     `json:"id"`
@@ -123,6 +149,13 @@ func toGameDetailDTO(detail model.GameDetail) gameDetailDTO {
 	}
 	for _, binding := range detail.Bindings {
 		ext := strings.ToLower(filepath.Ext(binding.RelativePath))
+		profileName := binding.ProfileID
+		format := ""
+		if profile, ok := adapter.Profile(binding.ProfileID); ok {
+			profileName = profile.Name
+			format = profile.Format
+		}
+		hasRTC := bindingRevisionHasRTC(detail, binding)
 		state := "paused"
 		var deliveredAt *time.Time
 		if latestObservationAction(detail, binding.EndpointID, binding.RelativePath) == "missing" {
@@ -144,9 +177,85 @@ func toGameDetailDTO(detail model.GameDetail) gameDetailDTO {
 				break
 			}
 		}
-		result.Bindings = append(result.Bindings, bindingDTO{ID: binding.ID, EndpointID: binding.EndpointID, EndpointName: endpointName(binding.EndpointID), RelativePath: binding.RelativePath, Extension: ext, BaselineRevisionID: binding.LastDeployedRevisionID, DeliveryState: state, LastDeliveredAt: deliveredAt})
+		result.Bindings = append(result.Bindings, bindingDTO{ID: binding.ID, EndpointID: binding.EndpointID, EndpointName: endpointName(binding.EndpointID), RelativePath: binding.RelativePath, Extension: ext, BaselineRevisionID: binding.LastDeployedRevisionID, DeliveryState: state, LastDeliveredAt: deliveredAt, ProfileID: binding.ProfileID, ProfileName: profileName, Format: format, HasRTC: hasRTC})
 	}
 	return result
+}
+
+func bindingRevisionHasRTC(detail model.GameDetail, binding model.SaveBinding) bool {
+	revisionID := binding.LastDeployedRevisionID
+	if revisionID != "" {
+		for _, revision := range detail.Revisions {
+			if revision.ID == revisionID {
+				return revision.HasRTC
+			}
+		}
+	}
+	for _, revision := range detail.Revisions {
+		if revision.ID == detail.CurrentRevisionID {
+			return revision.HasRTC
+		}
+	}
+	return false
+}
+
+func toEmulatorSettingsDTO(settings model.EmulatorSettings, unassigned []store.UnassignedFile) emulatorSettingsDTO {
+	return emulatorSettingsDTO{
+		WindowsGBAProfileID: settings.WindowsGBAProfileID,
+		Configured:          settings.WindowsGBAConfigured,
+		DetectedProfileID:   detectedWindowsGBAProfile(unassigned),
+		AffectedBindings:    settings.AffectedBindings,
+	}
+}
+
+func toUnassignedDTO(item store.UnassignedFile, windowsGBAProfileID string) unassignedDTO {
+	result := unassignedDTO{
+		ID:                   item.ID,
+		EndpointID:           item.EndpointID,
+		RelativePath:         item.RelativePath,
+		BlobHash:             item.BlobHash,
+		Size:                 item.Size,
+		SourceModifiedAt:     item.SourceModifiedAt,
+		ObservedAt:           item.ObservedAt,
+		Provenance:           item.Provenance,
+		State:                item.State,
+		Detail:               item.Detail,
+		CompatibleProfileIDs: []string{},
+	}
+	matches := adapter.MatchingProfiles(item.EndpointID, model.PlatformGBA, item.RelativePath, item.Size)
+	matches = append(matches, adapter.MatchingProfiles(item.EndpointID, model.PlatformNDS, item.RelativePath, item.Size)...)
+	for _, profile := range matches {
+		result.CompatibleProfileIDs = append(result.CompatibleProfileIDs, profile.ID)
+	}
+	if len(matches) == 1 {
+		result.SuggestedProfileID = matches[0].ID
+	} else if item.EndpointID == "windows" {
+		for _, profile := range matches {
+			if profile.ID == windowsGBAProfileID {
+				result.SuggestedProfileID = windowsGBAProfileID
+				break
+			}
+		}
+	}
+	return result
+}
+
+func detectedWindowsGBAProfile(items []store.UnassignedFile) string {
+	detected := ""
+	for _, item := range items {
+		if item.EndpointID != "windows" {
+			continue
+		}
+		matches := adapter.MatchingProfiles(item.EndpointID, model.PlatformGBA, item.RelativePath, item.Size)
+		if len(matches) != 1 {
+			continue
+		}
+		if detected != "" && detected != matches[0].ID {
+			return ""
+		}
+		detected = matches[0].ID
+	}
+	return detected
 }
 
 func gameDelivery(detail model.GameDetail) (string, string) {
@@ -196,7 +305,10 @@ func toRevisionDTO(item model.Revision) revisionDTO {
 	if item.SourceModifiedAt != nil {
 		modified = *item.SourceModifiedAt
 	}
-	hash := item.BlobHash
+	hash := item.ContentHash
+	if hash == "" {
+		hash = item.BlobHash
+	}
 	if len(hash) > 12 {
 		hash = hash[:12]
 	}
@@ -266,7 +378,7 @@ func profileSummary(id string) string {
 	if id == "thor" {
 		return "RetroArch mGBA / melonDS DS"
 	}
-	return "VBA-M / melonDS"
+	return "mGBA / VBA-M / melonDS"
 }
 func activityTitle(kind string) string {
 	switch kind {

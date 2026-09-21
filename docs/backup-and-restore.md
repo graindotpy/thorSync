@@ -9,6 +9,11 @@ Required recovery set:
 - `/DATA/AppData/thorsync/data` — SQLite metadata, WAL files, event cursor, and migration backups.
 - `/DATA/AppData/thorsync/archive` — immutable save blobs.
 
+For standalone mGBA, the archive contains the exact physical `.sav` occurrence
+as well as deduplicated battery and optional 16-byte RTC components. The SQLite
+metadata in `data/` is what associates those blobs into a logical revision, so
+neither directory is a complete backup by itself.
+
 Recommended additions:
 
 - `/DATA/AppData/thorsync/syncthing` — hub identity and folder/device configuration.

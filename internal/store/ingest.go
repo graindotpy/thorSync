@@ -16,8 +16,13 @@ import (
 )
 
 type IngestParams struct {
-	Binding         model.SaveBinding
+	Binding model.SaveBinding
+	// Blob is the legacy single-component input. New callers should provide
+	// ObservedBlob and BatteryBlob; Blob remains as a compatibility fallback.
 	Blob            archive.Blob
+	ObservedBlob    archive.Blob
+	BatteryBlob     archive.Blob
+	RTCBlob         *archive.Blob
 	SourceModified  *time.Time
 	ObservedAt      time.Time
 	Provenance      model.Provenance
@@ -30,9 +35,46 @@ type IngestParams struct {
 type IngestResult struct {
 	GameID          string
 	RevisionID      string
+	ContentHash     string
 	State           string
 	ShouldPropagate bool
 	Echo            bool
+}
+
+// PayloadContentHash returns the logical identity of a decoded save payload.
+// Battery-only revisions retain the battery blob hash for backwards identity.
+// Multi-component revisions use a versioned, unambiguous manifest hash.
+func PayloadContentHash(batteryBlobHash, rtcBlobHash string) string {
+	if rtcBlobHash == "" {
+		return batteryBlobHash
+	}
+	digest := sha256.Sum256([]byte("thorsync-payload-v1\x00" + batteryBlobHash + "\x00" + rtcBlobHash))
+	return hex.EncodeToString(digest[:])
+}
+
+func normalizeIngestBlobs(p IngestParams) (archive.Blob, archive.Blob, error) {
+	observed := p.ObservedBlob
+	if observed.Hash == "" {
+		observed = p.Blob
+	}
+	battery := p.BatteryBlob
+	if battery.Hash == "" {
+		battery = p.Blob
+	}
+	if battery.Hash == "" {
+		battery = observed
+	}
+	if observed.Hash == "" {
+		observed = battery
+	}
+	if observed.Hash == "" || battery.Hash == "" {
+		return archive.Blob{}, archive.Blob{}, errors.New("observed and battery blobs are required")
+	}
+	return observed, battery, nil
+}
+
+func profileInheritsRTC(profileID string) bool {
+	return profileID == "thor-mgba" || profileID == "windows-vbam"
 }
 
 func (s *Store) RecordIngest(ctx context.Context, p IngestParams) (IngestResult, error) {
@@ -47,23 +89,38 @@ func (s *Store) RecordIngest(ctx context.Context, p IngestParams) (IngestResult,
 	if p.Provenance == "" {
 		p.Provenance = model.ProvenanceUnknown
 	}
+	observedBlob, batteryBlob, err := normalizeIngestBlobs(p)
+	if err != nil {
+		return IngestResult{}, err
+	}
 	observationPath := p.ObservationPath
 	if observationPath == "" {
 		observationPath = p.Binding.RelativePath
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO blobs (hash,size,created_at) VALUES (?,?,?)", p.Blob.Hash, p.Blob.Size, p.ObservedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO blobs (hash,size,created_at) VALUES (?,?,?)", observedBlob.Hash, observedBlob.Size, p.ObservedAt); err != nil {
 		return IngestResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO blobs (hash,size,created_at) VALUES (?,?,?)", batteryBlob.Hash, batteryBlob.Size, p.ObservedAt); err != nil {
+		return IngestResult{}, err
+	}
+	if p.RTCBlob != nil && p.RTCBlob.Hash != "" {
+		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO blobs (hash,size,created_at) VALUES (?,?,?)", p.RTCBlob.Hash, p.RTCBlob.Size, p.ObservedAt); err != nil {
+			return IngestResult{}, err
+		}
 	}
 
 	observationID := ids.New()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO observations (id,game_id,endpoint_id,relative_path,blob_hash,action,source_modified_at,observed_at,provenance,detail) VALUES (?,?,?,?,?,'changed',?,?,?,?)`,
-		observationID, p.Binding.GameID, p.Binding.EndpointID, observationPath, p.Blob.Hash, p.SourceModified, p.ObservedAt, p.Provenance, p.Detail); err != nil {
+		observationID, p.Binding.GameID, p.Binding.EndpointID, observationPath, observedBlob.Hash, p.SourceModified, p.ObservedAt, p.Provenance, p.Detail); err != nil {
 		return IngestResult{}, err
 	}
 
 	var echoOperationID, echoRevisionID string
 	if !p.ForceConflict {
-		err = tx.QueryRowContext(ctx, `SELECT id,revision_id FROM broker_operations WHERE target_endpoint_id=? AND relative_path=? AND blob_hash=? AND state IN ('pending','written') ORDER BY created_at DESC LIMIT 1`, p.Binding.EndpointID, p.Binding.RelativePath, p.Blob.Hash).Scan(&echoOperationID, &echoRevisionID)
+		err = tx.QueryRowContext(ctx, `SELECT id,revision_id FROM broker_operations
+			WHERE target_endpoint_id=? AND relative_path=? AND blob_hash=?
+			AND (profile_id='' OR profile_id=?) AND state IN ('pending','written')
+			ORDER BY created_at DESC LIMIT 1`, p.Binding.EndpointID, p.Binding.RelativePath, observedBlob.Hash, p.Binding.ProfileID).Scan(&echoOperationID, &echoRevisionID)
 	} else {
 		err = sql.ErrNoRows
 	}
@@ -89,24 +146,44 @@ func (s *Store) RecordIngest(ctx context.Context, p IngestParams) (IngestResult,
 				return IngestResult{}, err
 			}
 		}
+		var contentHash string
+		_ = tx.QueryRowContext(ctx, `SELECT COALESCE(rp.content_hash,r.blob_hash) FROM revisions r LEFT JOIN revision_payloads rp ON rp.revision_id=r.id WHERE r.id=?`, echoRevisionID).Scan(&contentHash)
 		if err = tx.Commit(); err != nil {
 			return IngestResult{}, err
 		}
-		return IngestResult{GameID: p.Binding.GameID, RevisionID: echoRevisionID, State: state, Echo: true}, nil
+		return IngestResult{GameID: p.Binding.GameID, RevisionID: echoRevisionID, ContentHash: contentHash, State: state, Echo: true}, nil
 	}
 	if err != sql.ErrNoRows {
 		return IngestResult{}, err
 	}
 
+	var rtcBlobHash string
+	var rtcSize int64
+	if p.RTCBlob != nil && p.RTCBlob.Hash != "" {
+		rtcBlobHash = p.RTCBlob.Hash
+		rtcSize = p.RTCBlob.Size
+	} else if profileInheritsRTC(p.Binding.ProfileID) && p.Binding.LastDeployedRevisionID != "" {
+		// A battery-only emulator cannot report RTC changes. Preserve the RTC from
+		// the exact revision last delivered to that physical endpoint; inheriting
+		// from the current head could silently make a stale edit appear linear.
+		err = tx.QueryRowContext(ctx, `SELECT COALESCE(rtc_blob_hash,''),rtc_size FROM revision_payloads WHERE revision_id=?`, p.Binding.LastDeployedRevisionID).Scan(&rtcBlobHash, &rtcSize)
+		if err != nil && err != sql.ErrNoRows {
+			return IngestResult{}, err
+		}
+	}
+	contentHash := PayloadContentHash(batteryBlob.Hash, rtcBlobHash)
+
 	var currentID, currentHash string
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(g.current_revision_id,''),COALESCE(r.blob_hash,'') FROM games g LEFT JOIN revisions r ON r.id=g.current_revision_id WHERE g.id=?`, p.Binding.GameID).Scan(&currentID, &currentHash)
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(g.current_revision_id,''),COALESCE(rp.content_hash,r.blob_hash,'')
+		FROM games g LEFT JOIN revisions r ON r.id=g.current_revision_id
+		LEFT JOIN revision_payloads rp ON rp.revision_id=r.id WHERE g.id=?`, p.Binding.GameID).Scan(&currentID, &currentHash)
 	if err == sql.ErrNoRows {
 		return IngestResult{}, ErrNotFound
 	}
 	if err != nil {
 		return IngestResult{}, err
 	}
-	if currentHash == p.Blob.Hash && currentID != "" {
+	if currentHash == contentHash && currentID != "" && !p.ForceConflict {
 		if _, err = tx.ExecContext(ctx, "UPDATE observations SET revision_id=?,action='duplicate' WHERE id=?", currentID, observationID); err != nil {
 			return IngestResult{}, err
 		}
@@ -120,14 +197,16 @@ func (s *Store) RecordIngest(ctx context.Context, p IngestParams) (IngestResult,
 		if err = tx.Commit(); err != nil {
 			return IngestResult{}, err
 		}
-		return IngestResult{GameID: p.Binding.GameID, RevisionID: currentID, State: "duplicate", ShouldPropagate: enabled == "true", Echo: true}, nil
+		return IngestResult{GameID: p.Binding.GameID, RevisionID: currentID, ContentHash: contentHash, State: "duplicate", ShouldPropagate: enabled == "true", Echo: true}, nil
 	}
 
 	// Repeated scans of the same conflict artifact must preserve provenance
 	// without manufacturing duplicate immutable revisions. If the old branch
 	// is no longer under review, reopen a conflict against the current head.
 	var existingBranchID string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM revisions WHERE game_id=? AND blob_hash=? AND state='branch' ORDER BY observed_at DESC LIMIT 1`, p.Binding.GameID, p.Blob.Hash).Scan(&existingBranchID)
+	err = tx.QueryRowContext(ctx, `SELECT r.id FROM revisions r LEFT JOIN revision_payloads rp ON rp.revision_id=r.id
+		WHERE r.game_id=? AND COALESCE(rp.content_hash,r.blob_hash)=? AND r.state='branch'
+		ORDER BY r.observed_at DESC LIMIT 1`, p.Binding.GameID, contentHash).Scan(&existingBranchID)
 	if err == nil {
 		if _, err = tx.ExecContext(ctx, "UPDATE observations SET revision_id=?,action='duplicate-branch' WHERE id=?", existingBranchID, observationID); err != nil {
 			return IngestResult{}, err
@@ -154,7 +233,7 @@ func (s *Store) RecordIngest(ctx context.Context, p IngestParams) (IngestResult,
 		if err = tx.Commit(); err != nil {
 			return IngestResult{}, err
 		}
-		return IngestResult{GameID: p.Binding.GameID, RevisionID: existingBranchID, State: "branch", Echo: true}, nil
+		return IngestResult{GameID: p.Binding.GameID, RevisionID: existingBranchID, ContentHash: contentHash, State: "branch", Echo: true}, nil
 	}
 	if err != sql.ErrNoRows {
 		return IngestResult{}, err
@@ -176,9 +255,20 @@ func (s *Store) RecordIngest(ctx context.Context, p IngestParams) (IngestResult,
 		state = "branch"
 		kind = "conflict"
 	}
+	parentRevisionID := currentID
+	if !linear {
+		// A branch descends from the exact revision last deployed to its source
+		// binding, not from a newer head that the offline/stale device never saw.
+		// An empty baseline remains unknown rather than inventing ancestry.
+		parentRevisionID = p.Binding.LastDeployedRevisionID
+	}
 	revisionID := ids.New()
 	if _, err = tx.ExecContext(ctx, `INSERT INTO revisions (id,game_id,parent_revision_id,blob_hash,size,source_endpoint_id,source_modified_at,observed_at,provenance,kind,state) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		revisionID, p.Binding.GameID, nullString(currentID), p.Blob.Hash, p.Blob.Size, p.Binding.EndpointID, p.SourceModified, p.ObservedAt, p.Provenance, kind, state); err != nil {
+		revisionID, p.Binding.GameID, nullString(parentRevisionID), batteryBlob.Hash, batteryBlob.Size, p.Binding.EndpointID, p.SourceModified, p.ObservedAt, p.Provenance, kind, state); err != nil {
+		return IngestResult{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO revision_payloads (revision_id,battery_blob_hash,battery_size,rtc_blob_hash,rtc_size,content_hash) VALUES (?,?,?,?,?,?)`,
+		revisionID, batteryBlob.Hash, batteryBlob.Size, nullString(rtcBlobHash), rtcSize, contentHash); err != nil {
 		return IngestResult{}, err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE observations SET revision_id=? WHERE id=?", revisionID, observationID); err != nil {
@@ -222,7 +312,7 @@ func (s *Store) RecordIngest(ctx context.Context, p IngestParams) (IngestResult,
 	if err = tx.Commit(); err != nil {
 		return IngestResult{}, err
 	}
-	return IngestResult{GameID: p.Binding.GameID, RevisionID: revisionID, State: state, ShouldPropagate: shouldPropagate}, nil
+	return IngestResult{GameID: p.Binding.GameID, RevisionID: revisionID, ContentHash: contentHash, State: state, ShouldPropagate: shouldPropagate}, nil
 }
 
 func (s *Store) RecordUnassigned(ctx context.Context, endpointID, relativePath string, blob archive.Blob, sourceModified *time.Time, observed time.Time, provenance model.Provenance, detail string) error {
@@ -295,15 +385,39 @@ func insertActivityTx(ctx context.Context, tx *sql.Tx, gameID, kind, summary, en
 	return err
 }
 
-func (s *Store) CreateOperation(ctx context.Context, gameID, revisionID, targetEndpoint, path, hash string) (model.BrokerOperation, error) {
+// CreateOperation journals an exact materialized target. Legacy callers may
+// pass only a blob hash as profileOrHash. Component-aware callers pass the
+// target profile followed by the materialized archive blob.
+func (s *Store) CreateOperation(ctx context.Context, gameID, revisionID, targetEndpoint, path, profileOrHash string, materialized ...archive.Blob) (model.BrokerOperation, error) {
+	var profileID string
+	var target archive.Blob
+	switch len(materialized) {
+	case 0:
+		target.Hash = profileOrHash
+	case 1:
+		profileID = profileOrHash
+		target = materialized[0]
+	default:
+		return model.BrokerOperation{}, errors.New("exactly one materialized blob is allowed")
+	}
+	if target.Hash == "" {
+		return model.BrokerOperation{}, errors.New("materialized blob hash is required")
+	}
 	now := time.Now().UTC()
-	digest := sha256.Sum256([]byte(revisionID + "\x00" + targetEndpoint + "\x00" + path))
+	keyInput := revisionID + "\x00" + targetEndpoint + "\x00" + path
+	if len(materialized) == 1 {
+		keyInput = "thorsync-operation-v2\x00" + keyInput + "\x00" + profileID + "\x00" + target.Hash
+	}
+	digest := sha256.Sum256([]byte(keyInput))
 	key := hex.EncodeToString(digest[:])
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.BrokerOperation{}, err
 	}
 	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO blobs (hash,size,created_at) VALUES (?,?,?)`, target.Hash, target.Size, now); err != nil {
+		return model.BrokerOperation{}, err
+	}
 	if existing, err := operationByKey(ctx, tx, key); err == nil {
 		if err = tx.Commit(); err != nil {
 			return model.BrokerOperation{}, err
@@ -315,8 +429,8 @@ func (s *Store) CreateOperation(ctx context.Context, gameID, revisionID, targetE
 	if _, err = tx.ExecContext(ctx, `UPDATE broker_operations SET state='superseded',updated_at=? WHERE target_endpoint_id=? AND relative_path=? AND state IN ('pending','written')`, now, targetEndpoint, path); err != nil {
 		return model.BrokerOperation{}, err
 	}
-	op := model.BrokerOperation{ID: ids.New(), GameID: gameID, RevisionID: revisionID, TargetEndpointID: targetEndpoint, RelativePath: path, BlobHash: hash, State: "pending", CreatedAt: now, UpdatedAt: now}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO broker_operations (id,idempotency_key,game_id,revision_id,target_endpoint_id,relative_path,blob_hash,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, op.ID, key, op.GameID, op.RevisionID, op.TargetEndpointID, op.RelativePath, op.BlobHash, op.State, now, now); err != nil {
+	op := model.BrokerOperation{ID: ids.New(), GameID: gameID, RevisionID: revisionID, TargetEndpointID: targetEndpoint, RelativePath: path, ProfileID: profileID, BlobHash: target.Hash, State: "pending", CreatedAt: now, UpdatedAt: now}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO broker_operations (id,idempotency_key,game_id,revision_id,target_endpoint_id,relative_path,profile_id,blob_hash,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, op.ID, key, op.GameID, op.RevisionID, op.TargetEndpointID, op.RelativePath, op.ProfileID, op.BlobHash, op.State, now, now); err != nil {
 		return model.BrokerOperation{}, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -331,7 +445,7 @@ func operationByKey(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, key string) (model.BrokerOperation, error) {
 	var op model.BrokerOperation
-	err := queryer.QueryRowContext(ctx, `SELECT id,game_id,revision_id,target_endpoint_id,relative_path,blob_hash,state,error,created_at,updated_at FROM broker_operations WHERE idempotency_key=?`, key).Scan(&op.ID, &op.GameID, &op.RevisionID, &op.TargetEndpointID, &op.RelativePath, &op.BlobHash, &op.State, &op.Error, &op.CreatedAt, &op.UpdatedAt)
+	err := queryer.QueryRowContext(ctx, `SELECT id,game_id,revision_id,target_endpoint_id,relative_path,profile_id,blob_hash,state,error,created_at,updated_at FROM broker_operations WHERE idempotency_key=?`, key).Scan(&op.ID, &op.GameID, &op.RevisionID, &op.TargetEndpointID, &op.RelativePath, &op.ProfileID, &op.BlobHash, &op.State, &op.Error, &op.CreatedAt, &op.UpdatedAt)
 	return op, err
 }
 
@@ -343,15 +457,15 @@ func (s *Store) CompleteEndpointDeliveries(ctx context.Context, endpointID strin
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,game_id,revision_id,relative_path FROM broker_operations WHERE target_endpoint_id=? AND state='written' ORDER BY created_at`, endpointID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,game_id,revision_id,relative_path,profile_id FROM broker_operations WHERE target_endpoint_id=? AND state='written' ORDER BY created_at`, endpointID)
 	if err != nil {
 		return 0, err
 	}
-	type delivery struct{ id, gameID, revisionID, path string }
+	type delivery struct{ id, gameID, revisionID, path, profileID string }
 	var deliveries []delivery
 	for rows.Next() {
 		var item delivery
-		if err = rows.Scan(&item.id, &item.gameID, &item.revisionID, &item.path); err != nil {
+		if err = rows.Scan(&item.id, &item.gameID, &item.revisionID, &item.path, &item.profileID); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -365,7 +479,7 @@ func (s *Store) CompleteEndpointDeliveries(ctx context.Context, endpointID strin
 		if _, err = tx.ExecContext(ctx, `UPDATE broker_operations SET state='delivered',updated_at=? WHERE id=? AND state='written'`, now, item.id); err != nil {
 			return 0, err
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE save_bindings SET last_deployed_revision_id=?,updated_at=? WHERE endpoint_id=? AND relative_path=?`, item.revisionID, now, endpointID, item.path); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE save_bindings SET last_deployed_revision_id=?,updated_at=? WHERE endpoint_id=? AND relative_path=? AND (?='' OR profile_id=?)`, item.revisionID, now, endpointID, item.path, item.profileID, item.profileID); err != nil {
 			return 0, err
 		}
 		if err = insertActivityTx(ctx, tx, item.gameID, "delivery", "Save delivered to "+endpointID, endpointID, now); err != nil {
@@ -389,6 +503,35 @@ func (s *Store) MarkBindingDeployed(ctx context.Context, bindingID, revisionID s
 }
 
 type HeadMutation struct{ GameID, SourceRevisionID, ExpectedHeadID, IdempotencyKey, Actor, Kind string }
+
+func copyRevisionPayloadTx(ctx context.Context, tx *sql.Tx, sourceRevisionID, targetRevisionID string) (model.RevisionPayload, error) {
+	var payload model.RevisionPayload
+	var rtcHash sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT r.blob_hash,r.size,rp.battery_blob_hash,rp.battery_size,rp.rtc_blob_hash,rp.rtc_size,rp.content_hash
+		FROM revisions r LEFT JOIN revision_payloads rp ON rp.revision_id=r.id WHERE r.id=?`, sourceRevisionID).Scan(
+		new(string), new(int64), &payload.BatteryBlobHash, &payload.BatterySize, &rtcHash, &payload.RTCSize, &payload.ContentHash)
+	if err != nil {
+		// The normal migration guarantees a payload row. Keep this fallback for a
+		// partially restored database so a legacy revision is still recoverable.
+		var blobHash string
+		var size int64
+		if fallbackErr := tx.QueryRowContext(ctx, `SELECT blob_hash,size FROM revisions WHERE id=?`, sourceRevisionID).Scan(&blobHash, &size); fallbackErr != nil {
+			return model.RevisionPayload{}, err
+		}
+		payload.BatteryBlobHash = blobHash
+		payload.BatterySize = size
+		payload.ContentHash = blobHash
+	}
+	if rtcHash.Valid {
+		payload.RTCBlobHash = rtcHash.String
+	}
+	payload.RevisionID = targetRevisionID
+	if _, err = tx.ExecContext(ctx, `INSERT INTO revision_payloads (revision_id,battery_blob_hash,battery_size,rtc_blob_hash,rtc_size,content_hash) VALUES (?,?,?,?,?,?)`,
+		payload.RevisionID, payload.BatteryBlobHash, payload.BatterySize, nullString(payload.RTCBlobHash), payload.RTCSize, payload.ContentHash); err != nil {
+		return model.RevisionPayload{}, err
+	}
+	return payload, nil
+}
 
 func (s *Store) CreateHeadFromExisting(ctx context.Context, p HeadMutation) (model.Revision, error) {
 	if p.IdempotencyKey == "" {
@@ -454,6 +597,12 @@ func (s *Store) CreateHeadFromExisting(ctx context.Context, p HeadMutation) (mod
 	if err != nil {
 		return model.Revision{}, err
 	}
+	payload, err := copyRevisionPayloadTx(ctx, tx, source.ID, revision.ID)
+	if err != nil {
+		return model.Revision{}, err
+	}
+	revision.ContentHash = payload.ContentHash
+	revision.HasRTC = payload.RTCBlobHash != ""
 	if current != "" {
 		if _, err = tx.ExecContext(ctx, "UPDATE revisions SET state='history' WHERE id=? AND state='head'", current); err != nil {
 			return model.Revision{}, err
@@ -538,6 +687,12 @@ func (s *Store) CreateSnapshot(ctx context.Context, gameID, expectedHeadID, idem
 	if _, err = tx.ExecContext(ctx, `INSERT INTO revisions (id,game_id,parent_revision_id,blob_hash,size,observed_at,provenance,kind,state,actor) VALUES (?,?,?,?,?,?,?,?,?,?)`, revision.ID, gameID, currentID, blobHash, size, now, revision.Provenance, revision.Kind, revision.State, actor); err != nil {
 		return model.Revision{}, err
 	}
+	payload, err := copyRevisionPayloadTx(ctx, tx, currentID, revision.ID)
+	if err != nil {
+		return model.Revision{}, err
+	}
+	revision.ContentHash = payload.ContentHash
+	revision.HasRTC = payload.RTCBlobHash != ""
 	if _, err = tx.ExecContext(ctx, "UPDATE revisions SET state='history' WHERE id=? AND state='head'", currentID); err != nil {
 		return model.Revision{}, err
 	}

@@ -35,14 +35,21 @@ An immutable `sha-...` tag never receives a new digest, so a SHA-pinned deployme
 
 ## Roll back a database migration
 
-Before each migration ThorSync writes an online SQLite backup to:
+Before each schema or additive feature migration ThorSync writes an online
+SQLite backup to:
 
 ```text
 /DATA/AppData/thorsync/data/migration-backups/
   thorsync-before-v<TARGET>-<UTC_TIMESTAMP>.db
+  thorsync-before-revision-payloads-<UTC_TIMESTAMP>.db
 ```
 
-The newest ten migration backups are retained. Prefer an image-only rollback first: migrations are designed to remain readable by the immediately previous image. Restore a database backup only when the previous image cannot open the migrated database.
+The standalone-mGBA payload migration is additive and deliberately keeps
+SQLite `user_version=1`, so the immediately previous image can still open the
+database. The current image checks and backfills component metadata on every
+startup, including revisions made during a temporary rollback. The newest ten
+migration backups are retained. Prefer an image-only rollback first; restore a
+database backup only when the previous image cannot open the migrated database.
 
 1. Stop ThorSync so no process has the SQLite database or WAL open:
 

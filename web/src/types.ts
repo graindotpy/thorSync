@@ -3,6 +3,7 @@ export type DeviceKind = 'thor' | 'windows' | 'server'
 export type HealthState = 'healthy' | 'degraded' | 'offline'
 export type DeliveryState = 'delivered' | 'syncing' | 'paused' | 'missing'
 export type Provenance = 'confirmed' | 'inferred' | 'unknown'
+export type WindowsGbaProfileId = 'windows-mgba' | 'windows-vbam'
 
 export interface Endpoint {
   id: string
@@ -64,6 +65,26 @@ export interface SaveBinding {
   baselineRevisionId: string | null
   deliveryState: DeliveryState
   lastDeliveredAt: string | null
+  profileId: string
+  profileName: string
+  format: string
+  hasRtc: boolean
+}
+
+export interface EmulatorSettings {
+  windowsGbaProfileId: WindowsGbaProfileId
+  configured: boolean
+  detectedProfileId?: WindowsGbaProfileId
+  affectedBindings: number
+}
+
+export interface EmulatorProfile {
+  id: string
+  name: string
+  endpointId: 'thor' | 'windows'
+  platform: Platform | Lowercase<Platform>
+  extension: string
+  format: string
 }
 
 export interface ActivityItem {
@@ -128,6 +149,8 @@ export interface UnassignedFile {
   provenance: Provenance
   state: string
   detail?: string
+  suggestedProfileId?: string
+  compatibleProfileIds: string[]
 }
 
 export interface DashboardData {
@@ -139,6 +162,8 @@ export interface DashboardData {
   archive: ArchiveUsage
   onboarding: OnboardingStatus
   unassigned: UnassignedFile[]
+  emulatorSettings: EmulatorSettings
+  profiles: EmulatorProfile[]
 }
 
 export interface RestoreRequest {

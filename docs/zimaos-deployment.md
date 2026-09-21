@@ -94,7 +94,13 @@ propagation.
 
 Docker bridge networking does not reliably forward Syncthing's LAN-discovery broadcasts. Global discovery still works, but for predictable local transfers configure the hub on each endpoint as `tcp://ZIMA_LAN_IP:22000` (and configure direct endpoint addresses on the hub when needed). Keep TCP and UDP 22000 allowed by the ZimaOS LAN firewall.
 
-On the Thor, keep saves in ordinary shared storage such as `Emulation/Saves`; BasicSync cannot reliably access Android private application directories. Configure the RetroArch mGBA and melonDS DS profiles during ThorSync onboarding. On Windows, select the corresponding VBA-M and standalone melonDS save directories.
+On the Thor, keep saves in ordinary shared storage such as `Emulation/Saves`;
+BasicSync cannot reliably access Android private application directories.
+Configure the RetroArch mGBA and melonDS DS profiles during ThorSync onboarding.
+On Windows, standalone mGBA is the recommended and preselected GBA profile;
+VBA-M remains available globally and per game. Point Syncthing at the directory
+where the chosen emulator writes its `.sav` files. No converter, renamed copy,
+or separate RTC sidecar is required.
 
 ## 4. Start ThorSync
 
@@ -106,6 +112,21 @@ curl --fail http://127.0.0.1:8080/health/ready
 ```
 
 `/health/ready` may report a degraded dependency while Syncthing or Cloudflare JWKS is temporarily unavailable; that should not produce a restart loop. Open the Cloudflare-protected hostname to complete onboarding. Leave propagation disabled until initial saves have been inventoried and reconciled.
+
+### Existing-install mGBA upgrade
+
+An image containing first-class standalone mGBA support does not restart
+onboarding and requires no Compose, volume, secret, or environment change. Open
+**Settings → Emulator profiles**, choose **standalone mGBA**, close mGBA and
+RetroArch, tick the emulator-closed acknowledgement, and save. ThorSync keeps
+the current per-game baselines, changes existing Windows GBA bindings, and
+immediately reprocesses their live files. A quarantined `131,088`-byte save is
+then recognized as a `128 KiB` battery payload plus its exact `16`-byte RTC
+footer. The quarantine is cleared only after successful archival and ingest.
+
+Leave VBA-M selected instead if that is the emulator which owns the Windows
+folder. A game can override the global Windows GBA profile without changing
+other mappings.
 
 ## ZimaOS custom-app import
 

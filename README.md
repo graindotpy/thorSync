@@ -12,18 +12,26 @@ of guessing when progress diverges.
 
 | System | AYN Thor | Windows |
 | --- | --- | --- |
-| GBA | RetroArch mGBA (`.srm`) | VBA-M (`.sav`) |
+| GBA | RetroArch mGBA (`.srm`) | standalone mGBA (`.sav`, recommended) or VBA-M (`.sav`) |
 | Nintendo DS | RetroArch melonDS DS (`.srm`) | melonDS (`.sav`) |
 
 Only in-game/battery saves are supported. Savestates are deliberately excluded
 because they are tied to emulator and core versions.
+
+Standalone mGBA may append an opaque 16-byte RTC footer to its battery save.
+ThorSync separates that footer from the raw battery data, archives both exactly,
+and materializes the representation each emulator expects: raw `.srm` on
+RetroArch, raw `.sav` for VBA-M, and battery plus RTC for standalone mGBA when
+an RTC is available. ThorSync never interprets or fabricates RTC bytes. An
+RTC-only change is retained as a real immutable revision.
 
 ## What it does
 
 - Provides a responsive visual library with game status, current source
   device, timestamps, immutable history, activity, conflicts, and diagnostics.
 - Keeps the Thor and Windows Syncthing folders isolated and brokers only
-  byte-preserving, profile-validated saves between them.
+  profile-validated saves between them while preserving every original physical
+  occurrence and every logical save component.
 - Stores content-addressed SHA-256 blobs and separate observations, so the same
   bytes from two devices keep both provenance records without using twice the
   space.
@@ -114,6 +122,9 @@ The generator is pinned to the upstream revision named in
 - Deletions are recorded as missing and never propagated automatically.
 - Unsupported formats are archived but not deployed. ThorSync does not perform
   speculative save conversion.
+- Existing installations can select standalone mGBA or VBA-M from **Settings →
+  Emulator profiles** after closing emulators. This focused update preserves
+  game mappings and delivery baselines; the onboarding wizard does not restart.
 - Every production mutation is same-origin, authenticated, idempotent where it
   can overwrite a live save, and recorded in the operation journal.
 

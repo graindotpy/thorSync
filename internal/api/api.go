@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -75,6 +76,8 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/onboarding/folders", a.configureFolders)
 	mux.HandleFunc("POST /api/v1/onboarding/complete", a.completeOnboarding)
 	mux.HandleFunc("POST /api/v1/settings/propagation", a.propagation)
+	mux.HandleFunc("GET /api/v1/settings/emulators", a.emulatorSettings)
+	mux.HandleFunc("PUT /api/v1/settings/emulators/windows-gba", a.configureWindowsGBAProfile)
 	mux.HandleFunc("POST /api/v1/imports/retroarch", a.importRetroArch)
 	mux.HandleFunc("POST /api/v1/imports/rom-hashes", a.importROMHashes)
 	mux.HandleFunc("GET /api/v1/events", a.stream)
@@ -146,20 +149,61 @@ func (a *API) game(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) upsertBinding(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		EndpointID   string `json:"endpointId"`
-		ProfileID    string `json:"profileId"`
-		RelativePath string `json:"relativePath"`
+		EndpointID     string `json:"endpointId"`
+		ProfileID      string `json:"profileId"`
+		RelativePath   string `json:"relativePath"`
+		EmulatorClosed bool   `json:"emulatorClosed"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
+	}
+	existing, err := a.store.ListBindings(r.Context(), r.PathValue("id"))
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	requestedPath := pathpkg.Clean(strings.ReplaceAll(strings.TrimSpace(req.RelativePath), "\\", "/"))
+	var previous *model.SaveBinding
+	for _, binding := range existing {
+		if binding.EndpointID == req.EndpointID {
+			copy := binding
+			previous = &copy
+			if (binding.ProfileID != req.ProfileID || binding.RelativePath != requestedPath) && !req.EmulatorClosed {
+				writeError(w, http.StatusBadRequest, "confirm that all emulators are closed")
+				return
+			}
+		}
+	}
+	preCaptured := false
+	if previous != nil && (previous.ProfileID != req.ProfileID || previous.RelativePath != requestedPath) {
+		result, _ := a.captureBindingNow(*previous, "Captured before emulator profile or path change")
+		preCaptured = result.RevisionID != ""
 	}
 	binding, err := a.store.UpsertBinding(r.Context(), model.SaveBinding{GameID: r.PathValue("id"), EndpointID: req.EndpointID, ProfileID: req.ProfileID, RelativePath: req.RelativePath})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	a.broker.Schedule(context.Background(), broker.CaptureInput{EndpointID: binding.EndpointID, RelativePath: binding.RelativePath, Provenance: model.ProvenanceUnknown, Detail: "Captured after manual save mapping"})
+	if previous != nil && previous.ProfileID != binding.ProfileID && previous.RelativePath == binding.RelativePath && preCaptured {
+		if err = a.rematerializeBindingNow(binding); err != nil {
+			a.hub.Publish(events.Event{Type: "profile-reprocess-error", GameID: binding.GameID, Message: err.Error()})
+		}
+	} else if _, captureErr := a.captureBindingNow(binding, "Captured after manual save mapping or profile change"); captureErr != nil {
+		a.broker.Schedule(context.Background(), broker.CaptureInput{EndpointID: binding.EndpointID, RelativePath: binding.RelativePath, Provenance: model.ProvenanceUnknown, Detail: "Retry after manual save mapping or profile change"})
+	}
 	writeJSON(w, http.StatusOK, binding)
+}
+
+func (a *API) captureBindingNow(binding model.SaveBinding, detail string) (store.IngestResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return a.broker.Capture(ctx, broker.CaptureInput{EndpointID: binding.EndpointID, RelativePath: binding.RelativePath, Provenance: model.ProvenanceUnknown, Detail: detail})
+}
+
+func (a *API) rematerializeBindingNow(binding model.SaveBinding) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return a.broker.RematerializeBinding(ctx, binding)
 }
 
 type mutationRequest struct {
@@ -343,7 +387,16 @@ func (a *API) unassigned(w http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	settings, err := a.store.EmulatorSettings(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	result := make([]unassignedDTO, 0, len(items))
+	for _, item := range items {
+		result = append(result, toUnassignedDTO(item, settings.WindowsGBAProfileID))
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *API) archiveUsage(w http.ResponseWriter, r *http.Request) {
@@ -520,6 +573,94 @@ func (a *API) propagation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
+}
+
+func (a *API) emulatorSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := a.store.EmulatorSettings(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	unassigned, err := a.store.ListUnassigned(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toEmulatorSettingsDTO(settings, unassigned))
+}
+
+func (a *API) configureWindowsGBAProfile(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProfileID       string `json:"profileId"`
+		EmulatorClosed  bool   `json:"emulatorClosed"`
+		ApplyToExisting bool   `json:"applyToExisting"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !req.EmulatorClosed {
+		writeError(w, http.StatusBadRequest, "confirm that all emulators are closed")
+		return
+	}
+	if req.ProfileID != "windows-mgba" && req.ProfileID != "windows-vbam" {
+		writeError(w, http.StatusBadRequest, "profileId must be windows-mgba or windows-vbam")
+		return
+	}
+	before, err := a.store.ListBindingsByPlatformEndpoint(r.Context(), model.PlatformGBA, "windows")
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	preCaptured := map[string]bool{}
+	if req.ApplyToExisting {
+		for _, binding := range before {
+			if binding.ProfileID == req.ProfileID {
+				continue
+			}
+			result, _ := a.captureBindingNow(binding, "Captured before Windows GBA emulator profile change")
+			preCaptured[binding.ID] = result.RevisionID != ""
+		}
+	}
+	_, err = a.store.ConfigureWindowsGBAProfile(r.Context(), req.ProfileID, req.ApplyToExisting)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	bindings, err := a.store.ListBindingsByPlatformEndpoint(r.Context(), model.PlatformGBA, "windows")
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	beforeByID := map[string]model.SaveBinding{}
+	for _, binding := range before {
+		beforeByID[binding.ID] = binding
+	}
+	if req.ApplyToExisting {
+		for _, binding := range bindings {
+			previous, existed := beforeByID[binding.ID]
+			profileChanged := existed && previous.ProfileID != binding.ProfileID
+			if profileChanged && preCaptured[binding.ID] {
+				if rematerializeErr := a.rematerializeBindingNow(binding); rematerializeErr != nil {
+					a.hub.Publish(events.Event{Type: "profile-reprocess-error", GameID: binding.GameID, Message: rematerializeErr.Error()})
+				}
+				continue
+			}
+			if _, captureErr := a.captureBindingNow(binding, "Reprocessed after Windows GBA emulator profile change"); captureErr != nil {
+				a.broker.Schedule(context.Background(), broker.CaptureInput{EndpointID: binding.EndpointID, RelativePath: binding.RelativePath, Provenance: model.ProvenanceUnknown, Detail: "Retry after Windows GBA emulator profile change"})
+			}
+		}
+	}
+	settings, err := a.store.EmulatorSettings(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	unassigned, err := a.store.ListUnassigned(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toEmulatorSettingsDTO(settings, unassigned))
 }
 
 func (a *API) importRetroArch(w http.ResponseWriter, r *http.Request) {

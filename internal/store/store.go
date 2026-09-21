@@ -18,6 +18,12 @@ import (
 
 const schemaVersion = 1
 
+const (
+	revisionPayloadsMigrationKey = "migration_revision_payloads_v1"
+	windowsGBAProfileSetting     = "windows_gba_profile"
+	windowsGBAConfiguredSetting  = "windows_gba_configured"
+)
+
 type Store struct {
 	db *sql.DB
 }
@@ -90,15 +96,111 @@ func (s *Store) migrate(ctx context.Context, dataDir string) error {
 			return fmt.Errorf("apply schema v1: %w", err)
 		}
 	}
+	// revision_payloads is an additive feature migration rather than a schema
+	// version bump. Keeping user_version at 1 allows upgraded databases to stay
+	// compatible with the original v1 release while a durable setting records
+	// that the one-time backup and backfill completed.
+	if err := s.migrateRevisionPayloads(ctx, dataDir, current != 0); err != nil {
+		return fmt.Errorf("apply revision payload migration: %w", err)
+	}
 	return nil
 }
 
+func (s *Store) migrateRevisionPayloads(ctx context.Context, dataDir string, existing bool) error {
+	var marker string
+	err := s.db.QueryRowContext(ctx, "SELECT value FROM settings WHERE key=?", revisionPayloadsMigrationKey).Scan(&marker)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	firstRun := marker != "complete"
+	if existing && firstRun {
+		if err := s.backupBeforeFeatureMigration(ctx, dataDir, "revision-payloads"); err != nil {
+			return fmt.Errorf("pre-migration backup: %w", err)
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS revision_payloads (
+		revision_id TEXT PRIMARY KEY REFERENCES revisions(id) ON DELETE CASCADE,
+		battery_blob_hash TEXT NOT NULL REFERENCES blobs(hash),
+		battery_size INTEGER NOT NULL,
+		rtc_blob_hash TEXT REFERENCES blobs(hash),
+		rtc_size INTEGER NOT NULL DEFAULT 0,
+		content_hash TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS revision_payloads_content ON revision_payloads(content_hash)`); err != nil {
+		return err
+	}
+	profileColumn, err := tableHasColumn(ctx, tx, "broker_operations", "profile_id")
+	if err != nil {
+		return err
+	}
+	if !profileColumn {
+		if _, err = tx.ExecContext(ctx, `ALTER TABLE broker_operations ADD COLUMN profile_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	// A legacy revision was a single raw battery-save blob. Its logical content
+	// identity intentionally remains that blob hash, rather than being rehashed.
+	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO revision_payloads
+		(revision_id,battery_blob_hash,battery_size,rtc_blob_hash,rtc_size,content_hash)
+		SELECT id,blob_hash,size,NULL,0,blob_hash FROM revisions`); err != nil {
+		return err
+	}
+	if firstRun {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO settings (key,value,updated_at) VALUES (?, 'complete', ?)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, revisionPayloadsMigrationKey, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+type pragmaQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func tableHasColumn(ctx context.Context, queryer pragmaQueryer, table, column string) (bool, error) {
+	rows, err := queryer.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 func (s *Store) backupBeforeMigration(ctx context.Context, dataDir string, target int) error {
+	return s.backupDatabase(ctx, dataDir, fmt.Sprintf("v%d", target))
+}
+
+func (s *Store) backupBeforeFeatureMigration(ctx context.Context, dataDir, feature string) error {
+	return s.backupDatabase(ctx, dataDir, feature)
+}
+
+func (s *Store) backupDatabase(ctx context.Context, dataDir, label string) error {
 	dir := filepath.Join(dataDir, "migration-backups")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	name := fmt.Sprintf("thorsync-before-v%d-%s.db", target, time.Now().UTC().Format("20060102T150405Z"))
+	name := fmt.Sprintf("thorsync-before-%s-%s.db", label, time.Now().UTC().Format("20060102T150405.000000000Z"))
 	path := filepath.Join(dir, name)
 	escaped := strings.ReplaceAll(filepath.ToSlash(path), "'", "''")
 	if _, err := s.db.ExecContext(ctx, "VACUUM INTO '"+escaped+"'"); err != nil {
@@ -110,14 +212,16 @@ func (s *Store) backupBeforeMigration(ctx context.Context, dataDir string, targe
 	}
 	var backups []os.DirEntry
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "thorsync-before-v") && strings.HasSuffix(entry.Name(), ".db") {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "thorsync-before-") && strings.HasSuffix(entry.Name(), ".db") {
 			backups = append(backups, entry)
 		}
 	}
 	sort.Slice(backups, func(i, j int) bool { return backups[i].Name() > backups[j].Name() })
-	for _, entry := range backups[10:] {
-		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
-			return err
+	if len(backups) > 10 {
+		for _, entry := range backups[10:] {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -152,9 +256,11 @@ func (s *Store) seed(ctx context.Context, cfg config.Config) error {
 		}
 	}
 	defaults := map[string]string{
-		"propagation_enabled":    "false",
-		"onboarding_complete":    "false",
-		"syncthing_event_cursor": "0",
+		"propagation_enabled":       "false",
+		"onboarding_complete":       "false",
+		"syncthing_event_cursor":    "0",
+		windowsGBAProfileSetting:    "windows-mgba",
+		windowsGBAConfiguredSetting: "false",
 	}
 	for key, value := range defaults {
 		_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)", key, value, now)
@@ -274,6 +380,15 @@ CREATE TABLE IF NOT EXISTS revisions (
   actor TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS revisions_game_observed ON revisions(game_id, observed_at DESC);
+CREATE TABLE IF NOT EXISTS revision_payloads (
+  revision_id TEXT PRIMARY KEY REFERENCES revisions(id) ON DELETE CASCADE,
+  battery_blob_hash TEXT NOT NULL REFERENCES blobs(hash),
+  battery_size INTEGER NOT NULL,
+  rtc_blob_hash TEXT REFERENCES blobs(hash),
+  rtc_size INTEGER NOT NULL DEFAULT 0,
+  content_hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS revision_payloads_content ON revision_payloads(content_hash);
 CREATE TABLE IF NOT EXISTS observations (
   id TEXT PRIMARY KEY,
   game_id TEXT REFERENCES games(id) ON DELETE CASCADE,
@@ -306,6 +421,7 @@ CREATE TABLE IF NOT EXISTS broker_operations (
   revision_id TEXT NOT NULL REFERENCES revisions(id),
   target_endpoint_id TEXT NOT NULL REFERENCES endpoints(id),
   relative_path TEXT NOT NULL,
+  profile_id TEXT NOT NULL DEFAULT '',
   blob_hash TEXT NOT NULL REFERENCES blobs(hash),
   state TEXT NOT NULL,
   error TEXT NOT NULL DEFAULT '',

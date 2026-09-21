@@ -6,6 +6,7 @@ import {
   mockDiagnostics,
   mockEndpoints,
   mockGames,
+  mockProfiles,
 } from '../data/mock'
 import type {
   ActivityItem,
@@ -14,6 +15,8 @@ import type {
   DashboardData,
   DiagnosticCheck,
   Endpoint,
+  EmulatorSettings,
+  EmulatorProfile,
   Game,
   GameDetail,
   OnboardingStatus,
@@ -74,9 +77,15 @@ const fallbackOnboarding: OnboardingStatus = {
   propagationEnabled: true,
 }
 
+const fallbackEmulatorSettings: EmulatorSettings = {
+  windowsGbaProfileId: 'windows-mgba',
+  configured: true,
+  affectedBindings: 0,
+}
+
 export async function loadDashboard(): Promise<{ data: DashboardData; isDemo: boolean }> {
   try {
-    const [games, endpoints, activity, conflicts, diagnostics, archive, onboarding, unassigned] =
+    const [games, endpoints, activity, conflicts, diagnostics, archive, onboarding, unassigned, emulatorSettings, profiles] =
       await Promise.all([
         request<Game[]>('/games'),
         request<Endpoint[]>('/endpoints'),
@@ -86,10 +95,12 @@ export async function loadDashboard(): Promise<{ data: DashboardData; isDemo: bo
         request<ArchiveUsage>('/archive/usage'),
         request<OnboardingStatus>('/onboarding'),
         request<UnassignedFile[]>('/unassigned'),
+        request<EmulatorSettings>('/settings/emulators'),
+        request<EmulatorProfile[]>('/profiles'),
       ])
 
     return {
-      data: { games, endpoints, activity, conflicts, diagnostics, archive, onboarding, unassigned },
+      data: { games, endpoints, activity, conflicts, diagnostics, archive, onboarding, unassigned, emulatorSettings, profiles },
       isDemo: false,
     }
   } catch (error) {
@@ -104,6 +115,8 @@ export async function loadDashboard(): Promise<{ data: DashboardData; isDemo: bo
         archive: mockArchive,
         onboarding: fallbackOnboarding,
         unassigned: [],
+        emulatorSettings: fallbackEmulatorSettings,
+        profiles: mockProfiles,
       },
       isDemo: true,
     }
@@ -176,10 +189,16 @@ export async function submitRomHashes(records: RomHashRecord[]): Promise<void> {
   })
 }
 
-export async function mapSaveToGame(gameId: string, endpointId: 'thor' | 'windows', profileId: string, relativePath: string): Promise<void> {
+export async function mapSaveToGame(
+  gameId: string,
+  endpointId: 'thor' | 'windows',
+  profileId: string,
+  relativePath: string,
+  emulatorClosed = false,
+): Promise<void> {
   await request(`/games/${encodeURIComponent(gameId)}/bindings`, {
     method: 'PUT',
-    body: JSON.stringify({ endpointId, profileId, relativePath }),
+    body: JSON.stringify({ endpointId, profileId, relativePath, emulatorClosed }),
   })
 }
 
@@ -196,6 +215,17 @@ export async function runEndpointAction(endpointId: string, action: 'scan' | 'pa
 
 export async function setPropagation(enabled: boolean): Promise<void> {
   await request('/settings/propagation', { method: 'POST', body: JSON.stringify({ enabled }) })
+}
+
+export async function setWindowsGbaProfile(
+  profileId: 'windows-mgba' | 'windows-vbam',
+  emulatorClosed: boolean,
+  applyToExisting = true,
+): Promise<void> {
+  await request('/settings/emulators/windows-gba', {
+    method: 'PUT',
+    body: JSON.stringify({ profileId, emulatorClosed, applyToExisting }),
+  })
 }
 
 export async function uploadArtwork(gameId: string, file: File): Promise<void> {

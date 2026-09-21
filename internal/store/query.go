@@ -80,9 +80,10 @@ func (s *Store) ListGames(ctx context.Context, search string, platform model.Pla
 		args = append(args, platform)
 	}
 	query := `SELECT g.id,g.title,g.platform,g.crc32,g.sha1,g.artwork_path,COALESCE(g.current_revision_id,''),g.status,g.created_at,g.updated_at,
-		COALESCE(r.blob_hash,''),COALESCE(r.source_endpoint_id,''),r.source_modified_at,r.observed_at,COALESCE(r.provenance,''),
+		COALESCE(rp.content_hash,r.blob_hash,''),COALESCE(r.source_endpoint_id,''),r.source_modified_at,r.observed_at,COALESCE(r.provenance,''),
 		(SELECT COUNT(*) FROM conflicts c WHERE c.game_id=g.id AND c.state='open')
-		FROM games g LEFT JOIN revisions r ON r.id=g.current_revision_id WHERE ` + strings.Join(where, " AND ") + ` ORDER BY COALESCE(r.observed_at,g.updated_at) DESC,g.title`
+		FROM games g LEFT JOIN revisions r ON r.id=g.current_revision_id
+		LEFT JOIN revision_payloads rp ON rp.revision_id=r.id WHERE ` + strings.Join(where, " AND ") + ` ORDER BY COALESCE(r.observed_at,g.updated_at) DESC,g.title`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -140,7 +141,7 @@ func (s *Store) GetGame(ctx context.Context, id string) (model.GameDetail, error
 	if base.CurrentRevisionID != "" {
 		for _, revision := range detail.Revisions {
 			if revision.ID == base.CurrentRevisionID {
-				detail.CurrentHash = revision.BlobHash
+				detail.CurrentHash = revision.ContentHash
 				detail.SourceEndpointID = revision.SourceEndpointID
 				detail.SourceModifiedAt = revision.SourceModifiedAt
 				value := revision.ObservedAt
@@ -182,6 +183,27 @@ func (s *Store) ListBindings(ctx context.Context, gameID string) ([]model.SaveBi
 
 func (s *Store) ListEndpointBindings(ctx context.Context, endpointID string) ([]model.SaveBinding, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,game_id,endpoint_id,profile_id,relative_path,COALESCE(last_deployed_revision_id,''),enabled FROM save_bindings WHERE endpoint_id=? AND enabled=1 ORDER BY relative_path`, endpointID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []model.SaveBinding{}
+	for rows.Next() {
+		var binding model.SaveBinding
+		if err := rows.Scan(&binding.ID, &binding.GameID, &binding.EndpointID, &binding.ProfileID, &binding.RelativePath, &binding.LastDeployedRevisionID, &binding.Enabled); err != nil {
+			return nil, err
+		}
+		result = append(result, binding)
+	}
+	return result, rows.Err()
+}
+
+// ListBindingsByPlatformEndpoint returns enabled bindings for a focused
+// emulator migration without making callers load every game independently.
+func (s *Store) ListBindingsByPlatformEndpoint(ctx context.Context, platform model.Platform, endpointID string) ([]model.SaveBinding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT b.id,b.game_id,b.endpoint_id,b.profile_id,b.relative_path,COALESCE(b.last_deployed_revision_id,''),b.enabled
+		FROM save_bindings b JOIN games g ON g.id=b.game_id
+		WHERE g.platform=? AND b.endpoint_id=? AND b.enabled=1 ORDER BY b.relative_path`, platform, endpointID)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +275,10 @@ func cleanRelative(path string) (string, error) {
 }
 
 func (s *Store) listRevisions(ctx context.Context, gameID string) ([]model.Revision, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,game_id,COALESCE(parent_revision_id,''),COALESCE(restored_from_id,''),COALESCE(promoted_from_id,''),blob_hash,size,COALESCE(source_endpoint_id,''),source_modified_at,observed_at,provenance,kind,state,actor FROM revisions WHERE game_id=? ORDER BY observed_at DESC`, gameID)
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.game_id,COALESCE(r.parent_revision_id,''),COALESCE(r.restored_from_id,''),COALESCE(r.promoted_from_id,''),r.blob_hash,r.size,
+		COALESCE(rp.content_hash,r.blob_hash),CASE WHEN COALESCE(rp.rtc_blob_hash,'')<>'' THEN 1 ELSE 0 END,
+		COALESCE(r.source_endpoint_id,''),r.source_modified_at,r.observed_at,r.provenance,r.kind,r.state,r.actor
+		FROM revisions r LEFT JOIN revision_payloads rp ON rp.revision_id=r.id WHERE r.game_id=? ORDER BY r.observed_at DESC`, gameID)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +288,7 @@ func (s *Store) listRevisions(ctx context.Context, gameID string) ([]model.Revis
 		var item model.Revision
 		var modified sql.NullTime
 		var provenance string
-		if err := rows.Scan(&item.ID, &item.GameID, &item.ParentRevisionID, &item.RestoredFromID, &item.PromotedFromID, &item.BlobHash, &item.Size, &item.SourceEndpointID, &modified, &item.ObservedAt, &provenance, &item.Kind, &item.State, &item.Actor); err != nil {
+		if err := rows.Scan(&item.ID, &item.GameID, &item.ParentRevisionID, &item.RestoredFromID, &item.PromotedFromID, &item.BlobHash, &item.Size, &item.ContentHash, &item.HasRTC, &item.SourceEndpointID, &modified, &item.ObservedAt, &provenance, &item.Kind, &item.State, &item.Actor); err != nil {
 			return nil, err
 		}
 		item.Provenance = model.Provenance(provenance)
@@ -354,7 +379,7 @@ func (s *Store) Conflict(ctx context.Context, id string) (model.Conflict, error)
 }
 
 func (s *Store) listOperations(ctx context.Context, gameID string) ([]model.BrokerOperation, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,game_id,revision_id,target_endpoint_id,relative_path,blob_hash,state,error,created_at,updated_at FROM broker_operations WHERE game_id=? ORDER BY created_at DESC LIMIT 250`, gameID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,game_id,revision_id,target_endpoint_id,relative_path,profile_id,blob_hash,state,error,created_at,updated_at FROM broker_operations WHERE game_id=? ORDER BY created_at DESC LIMIT 250`, gameID)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +387,7 @@ func (s *Store) listOperations(ctx context.Context, gameID string) ([]model.Brok
 	result := []model.BrokerOperation{}
 	for rows.Next() {
 		var item model.BrokerOperation
-		if err := rows.Scan(&item.ID, &item.GameID, &item.RevisionID, &item.TargetEndpointID, &item.RelativePath, &item.BlobHash, &item.State, &item.Error, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.GameID, &item.RevisionID, &item.TargetEndpointID, &item.RelativePath, &item.ProfileID, &item.BlobHash, &item.State, &item.Error, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
@@ -428,6 +453,85 @@ func (s *Store) Profiles(ctx context.Context) ([]model.EmulatorProfile, error) {
 	return result, rows.Err()
 }
 
+// EmulatorSettings reports the explicit Windows GBA choice. Existing v1
+// installs are intentionally left unconfirmed until the focused migration UI
+// records a choice, even though windows-mgba is the safe default for new data.
+func (s *Store) EmulatorSettings(ctx context.Context) (model.EmulatorSettings, error) {
+	result := model.EmulatorSettings{WindowsGBAProfileID: "windows-mgba"}
+	if value, err := s.Setting(ctx, windowsGBAProfileSetting); err != nil {
+		return model.EmulatorSettings{}, err
+	} else if value != "" {
+		result.WindowsGBAProfileID = value
+	}
+	if value, err := s.Setting(ctx, windowsGBAConfiguredSetting); err != nil {
+		return model.EmulatorSettings{}, err
+	} else {
+		result.WindowsGBAConfigured = value == "true"
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM save_bindings b JOIN games g ON g.id=b.game_id
+		WHERE b.endpoint_id='windows' AND g.platform=? AND b.enabled=1 AND b.profile_id<>?`, model.PlatformGBA, result.WindowsGBAProfileID).Scan(&result.AffectedBindings); err != nil {
+		return model.EmulatorSettings{}, err
+	}
+	return result, nil
+}
+
+// ConfigureWindowsGBAProfile persists a confirmed Windows GBA profile. When
+// applyExisting is true, existing Windows GBA bindings are atomically migrated
+// and returned so the broker can schedule immediate recaptures.
+func (s *Store) ConfigureWindowsGBAProfile(ctx context.Context, profileID string, applyExisting bool) ([]model.SaveBinding, error) {
+	profile, ok := adapter.Profile(profileID)
+	if !ok || profile.EndpointID != "windows" || profile.Platform != model.PlatformGBA {
+		return nil, errors.New("profile must be a Windows GBA emulator profile")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT b.id,b.game_id,b.endpoint_id,b.profile_id,b.relative_path,COALESCE(b.last_deployed_revision_id,''),b.enabled
+		FROM save_bindings b JOIN games g ON g.id=b.game_id
+		WHERE b.endpoint_id='windows' AND g.platform=? AND b.enabled=1 AND b.profile_id<>? ORDER BY b.relative_path`, model.PlatformGBA, profileID)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []model.SaveBinding
+	for rows.Next() {
+		var binding model.SaveBinding
+		if err = rows.Scan(&binding.ID, &binding.GameID, &binding.EndpointID, &binding.ProfileID, &binding.RelativePath, &binding.LastDeployedRevisionID, &binding.Enabled); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, binding)
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	changed := []model.SaveBinding{}
+	if applyExisting {
+		if _, err = tx.ExecContext(ctx, `UPDATE save_bindings SET profile_id=?,updated_at=? WHERE id IN (
+			SELECT b.id FROM save_bindings b JOIN games g ON g.id=b.game_id
+			WHERE b.endpoint_id='windows' AND g.platform=? AND b.enabled=1 AND b.profile_id<>?
+		)`, profileID, now, model.PlatformGBA, profileID); err != nil {
+			return nil, err
+		}
+		changed = candidates
+		for i := range changed {
+			changed[i].ProfileID = profileID
+		}
+	}
+	for key, value := range map[string]string{windowsGBAProfileSetting: profileID, windowsGBAConfiguredSetting: "true"} {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO settings (key,value,updated_at) VALUES (?,?,?)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, value, now); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return changed, nil
+}
+
 func (s *Store) ListActivity(ctx context.Context, limit int) ([]model.Activity, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -485,6 +589,23 @@ func (s *Store) ListUnassigned(ctx context.Context) ([]UnassignedFile, error) {
 	return result, rows.Err()
 }
 
+// ClearUnassigned resolves an unassigned or quarantined path after a successful
+// recapture. It is idempotent because event retries may observe the same file.
+func (s *Store) ClearUnassigned(ctx context.Context, endpointID, relativePath string) error {
+	clean, err := cleanRelative(relativePath)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE unassigned_files SET state='resolved' WHERE endpoint_id=? AND relative_path=?`, endpointID, clean)
+	return err
+}
+
+// ResolveUnassigned is retained as a descriptive alias for callers which
+// present quarantine resolution as an explicit administrative action.
+func (s *Store) ResolveUnassigned(ctx context.Context, endpointID, relativePath string) error {
+	return s.ClearUnassigned(ctx, endpointID, relativePath)
+}
+
 func (s *Store) SetArtwork(ctx context.Context, gameID, path string) error {
 	result, err := s.db.ExecContext(ctx, "UPDATE games SET artwork_path=?,updated_at=? WHERE id=?", path, time.Now().UTC(), gameID)
 	if err != nil {
@@ -510,7 +631,10 @@ func (s *Store) Revision(ctx context.Context, id string) (model.Revision, error)
 	var item model.Revision
 	var modified sql.NullTime
 	var provenance string
-	err := s.db.QueryRowContext(ctx, `SELECT id,game_id,COALESCE(parent_revision_id,''),COALESCE(restored_from_id,''),COALESCE(promoted_from_id,''),blob_hash,size,COALESCE(source_endpoint_id,''),source_modified_at,observed_at,provenance,kind,state,actor FROM revisions WHERE id=?`, id).Scan(&item.ID, &item.GameID, &item.ParentRevisionID, &item.RestoredFromID, &item.PromotedFromID, &item.BlobHash, &item.Size, &item.SourceEndpointID, &modified, &item.ObservedAt, &provenance, &item.Kind, &item.State, &item.Actor)
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.game_id,COALESCE(r.parent_revision_id,''),COALESCE(r.restored_from_id,''),COALESCE(r.promoted_from_id,''),r.blob_hash,r.size,
+		COALESCE(rp.content_hash,r.blob_hash),CASE WHEN COALESCE(rp.rtc_blob_hash,'')<>'' THEN 1 ELSE 0 END,
+		COALESCE(r.source_endpoint_id,''),r.source_modified_at,r.observed_at,r.provenance,r.kind,r.state,r.actor
+		FROM revisions r LEFT JOIN revision_payloads rp ON rp.revision_id=r.id WHERE r.id=?`, id).Scan(&item.ID, &item.GameID, &item.ParentRevisionID, &item.RestoredFromID, &item.PromotedFromID, &item.BlobHash, &item.Size, &item.ContentHash, &item.HasRTC, &item.SourceEndpointID, &modified, &item.ObservedAt, &provenance, &item.Kind, &item.State, &item.Actor)
 	if err == sql.ErrNoRows {
 		return model.Revision{}, ErrNotFound
 	}
@@ -523,6 +647,26 @@ func (s *Store) Revision(ctx context.Context, id string) (model.Revision, error)
 		item.SourceModifiedAt = &v
 	}
 	return item, nil
+}
+
+func (s *Store) RevisionPayload(ctx context.Context, revisionID string) (model.RevisionPayload, error) {
+	var payload model.RevisionPayload
+	var rtcHash sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT rp.revision_id,rp.battery_blob_hash,rp.battery_size,rp.rtc_blob_hash,rp.rtc_size,rp.content_hash
+		FROM revision_payloads rp WHERE rp.revision_id=?`, revisionID).Scan(&payload.RevisionID, &payload.BatteryBlobHash, &payload.BatterySize, &rtcHash, &payload.RTCSize, &payload.ContentHash)
+	if err == sql.ErrNoRows {
+		// This fallback also makes a partially migrated backup readable.
+		if err = s.db.QueryRowContext(ctx, `SELECT id,blob_hash,size,blob_hash FROM revisions WHERE id=?`, revisionID).Scan(&payload.RevisionID, &payload.BatteryBlobHash, &payload.BatterySize, &payload.ContentHash); err == sql.ErrNoRows {
+			return model.RevisionPayload{}, ErrNotFound
+		}
+	}
+	if err != nil {
+		return model.RevisionPayload{}, err
+	}
+	if rtcHash.Valid {
+		payload.RTCBlobHash = rtcHash.String
+	}
+	return payload, nil
 }
 
 func (s *Store) RootForEndpoint(ctx context.Context, id string) (string, error) {
