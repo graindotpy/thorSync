@@ -544,6 +544,7 @@ body.modal-open { overflow: hidden; }
 .art-upload { position: absolute; right: 10px; bottom: 10px; z-index: 2; display: inline-flex; align-items: center; gap: 6px; padding: 7px 9px; border: 1px solid rgba(255,255,255,.18); border-radius: 8px; color: #fff; background: rgba(5,9,11,.78); backdrop-filter: blur(8px); cursor: pointer; font-size: 8px; }
 .art-upload input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .unassigned-row { display: grid; grid-template-columns: auto minmax(220px, 1fr) minmax(180px, 280px) auto; align-items: center; gap: 16px; padding: 18px; }
+.unassigned-row--quarantine { border-color: rgba(255,183,77,.36); }
 .unassigned-row__icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; color: var(--amber); background: rgba(255,183,77,.12); }
 .unassigned-row__copy { min-width: 0; }
 .unassigned-row__copy strong, .unassigned-row__copy small, .unassigned-row__copy p { display: block; }

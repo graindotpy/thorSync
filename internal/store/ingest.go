@@ -41,6 +41,18 @@ type IngestResult struct {
 	Echo            bool
 }
 
+type RejectedIngestParams struct {
+	Binding         model.SaveBinding
+	ObservedBlob    archive.Blob
+	BatteryBlob     archive.Blob
+	RTCBlob         *archive.Blob
+	SourceModified  *time.Time
+	ObservedAt      time.Time
+	Provenance      model.Provenance
+	ObservationPath string
+	Detail          string
+}
+
 // PayloadContentHash returns the logical identity of a decoded save payload.
 // Battery-only revisions retain the battery blob hash for backwards identity.
 // Multi-component revisions use a versioned, unambiguous manifest hash.
@@ -329,6 +341,54 @@ func (s *Store) RecordUnassigned(ctx context.Context, endpointID, relativePath s
 		_ = s.RecordActivity(ctx, "", "unassigned", "Unassigned save discovered: "+relativePath, endpointID)
 	}
 	return err
+}
+
+// RecordRejectedIngest preserves a bound physical occurrence and all decoded
+// components without creating a revision or changing the current game head.
+// It is used for structurally recognizable but incomplete emulator writes.
+func (s *Store) RecordRejectedIngest(ctx context.Context, p RejectedIngestParams) error {
+	if p.ObservedAt.IsZero() {
+		p.ObservedAt = time.Now().UTC()
+	}
+	if p.Provenance == "" {
+		p.Provenance = model.ProvenanceUnknown
+	}
+	if p.ObservationPath == "" {
+		p.ObservationPath = p.Binding.RelativePath
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, blob := range []archive.Blob{p.ObservedBlob, p.BatteryBlob} {
+		if blob.Hash == "" {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO blobs (hash,size,created_at) VALUES (?,?,?)", blob.Hash, blob.Size, p.ObservedAt); err != nil {
+			return err
+		}
+	}
+	if p.RTCBlob != nil && p.RTCBlob.Hash != "" {
+		if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO blobs (hash,size,created_at) VALUES (?,?,?)", p.RTCBlob.Hash, p.RTCBlob.Size, p.ObservedAt); err != nil {
+			return err
+		}
+	}
+
+	if _, err = tx.ExecContext(ctx, `INSERT INTO observations (id,game_id,endpoint_id,relative_path,blob_hash,action,source_modified_at,observed_at,provenance,detail)
+		VALUES (?,?,?,?,?,'quarantined',?,?,?,?)`, ids.New(), p.Binding.GameID, p.Binding.EndpointID, p.ObservationPath, p.ObservedBlob.Hash, p.SourceModified, p.ObservedAt, p.Provenance, p.Detail); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO unassigned_files (id,endpoint_id,relative_path,blob_hash,size,source_modified_at,observed_at,provenance,state,detail) VALUES (?,?,?,?,?,?,?,?,'unassigned',?)
+		ON CONFLICT(endpoint_id,relative_path) DO UPDATE SET blob_hash=excluded.blob_hash,size=excluded.size,source_modified_at=excluded.source_modified_at,observed_at=excluded.observed_at,provenance=excluded.provenance,state='unassigned',detail=excluded.detail`,
+		ids.New(), p.Binding.EndpointID, p.ObservationPath, p.ObservedBlob.Hash, p.ObservedBlob.Size, p.SourceModified, p.ObservedAt, p.Provenance, p.Detail); err != nil {
+		return err
+	}
+	if err = insertActivityTx(ctx, tx, p.Binding.GameID, "quarantine", "Incomplete save write archived; delivery paused", p.Binding.EndpointID, p.ObservedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RecordQuarantine persists a file problem even when no safe non-empty blob

@@ -124,6 +124,13 @@ immediately reprocesses their live files. A quarantined `131,088`-byte save is
 then recognized as a `128 KiB` battery payload plus its exact `16`-byte RTC
 footer. The quarantine is cleared only after successful archival and ingest.
 
+For recognized Pokémon Generation III saves, ThorSync also checks both
+rotating flash-save slots before delivery. An interrupted newest cycle is
+archived and shown under **Unassigned and quarantined files**, while the current
+complete revision remains active and no incomplete bytes are brokered to the
+other device. ThorSync retries automatically when the emulator later writes a
+complete save.
+
 Leave VBA-M selected instead if that is the emulator which owns the Windows
 folder. A game can override the global Windows GBA profile without changing
 other mappings.

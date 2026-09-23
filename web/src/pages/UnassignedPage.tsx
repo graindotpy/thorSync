@@ -72,16 +72,18 @@ export function UnassignedPage({ files, games, profiles, onMapped, navigate }: U
         const game = games.find((candidate) => candidate.id === selection?.gameId)
         const candidates = game ? compatibleProfiles(file, game, profiles) : []
         const profile = candidates.find((candidate) => candidate.id === selection?.profileId)
-        return <article className="panel unassigned-row" key={file.id}>
-          <span className="unassigned-row__icon"><FileQuestion size={21} /></span>
+        return <article className={`panel unassigned-row${file.reviewOnly ? ' unassigned-row--quarantine' : ''}`} key={file.id}>
+          <span className="unassigned-row__icon">{file.reviewOnly ? <ShieldAlert size={21} /> : <FileQuestion size={21} />}</span>
           <div className="unassigned-row__copy"><strong>{file.relativePath}</strong><small>{file.endpointId === 'thor' ? 'AYN Thor' : 'Windows PC'} · {fileSize(file.size)} · observed {timeAgo(file.observedAt)}</small><p>{file.detail}</p>{file.compatibleProfileIds.length === 1 && file.compatibleProfileIds[0] === 'windows-mgba' && <small className="format-hint">Standalone mGBA RTC format detected</small>}</div>
-          <div className="unassigned-row__mapping">
-            <select aria-label={`Game for ${file.relativePath}`} value={selection?.gameId ?? ''} onChange={(event) => selectGame(file, event.target.value)}><option value="">Choose a game…</option>{sortedGames.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.title} ({candidate.platform})</option>)}</select>
-            {game && candidates.length > 1 && <select aria-label={`Emulator for ${file.relativePath}`} value={selection?.profileId ?? ''} onChange={(event) => selectProfile(file.id, event.target.value)}><option value="">Choose the emulator…</option>{candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.name}</option>)}</select>}
-            {game && candidates.length === 1 && <small className="profile-choice">Adapter: {candidates[0].name}</small>}
-            {game && candidates.length === 0 && <small className="profile-choice profile-choice--error">This file is not compatible with the selected game.</small>}
-          </div>
-          <button className="button button--primary" type="button" disabled={!game || !profile || busy === file.id} onClick={() => void mapFile(file)}><Link2 size={15} />{busy === file.id ? 'Mapping…' : 'Map save'}</button>
+          {file.reviewOnly ? <div className="unassigned-row__mapping"><small className="profile-choice profile-choice--error">Delivery is paused for this file. ThorSync will retry it automatically after the next complete emulator save.</small></div> : <>
+            <div className="unassigned-row__mapping">
+              <select aria-label={`Game for ${file.relativePath}`} value={selection?.gameId ?? ''} onChange={(event) => selectGame(file, event.target.value)}><option value="">Choose a game…</option>{sortedGames.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.title} ({candidate.platform})</option>)}</select>
+              {game && candidates.length > 1 && <select aria-label={`Emulator for ${file.relativePath}`} value={selection?.profileId ?? ''} onChange={(event) => selectProfile(file.id, event.target.value)}><option value="">Choose the emulator…</option>{candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.name}</option>)}</select>}
+              {game && candidates.length === 1 && <small className="profile-choice">Adapter: {candidates[0].name}</small>}
+              {game && candidates.length === 0 && <small className="profile-choice profile-choice--error">This file is not compatible with the selected game.</small>}
+            </div>
+            <button className="button button--primary" type="button" disabled={!game || !profile || busy === file.id} onClick={() => void mapFile(file)}><Link2 size={15} />{busy === file.id ? 'Mapping…' : 'Map save'}</button>
+          </>}
         </article>
       })}</div>}
   </>

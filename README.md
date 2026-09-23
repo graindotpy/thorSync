@@ -25,6 +25,12 @@ RetroArch, raw `.sav` for VBA-M, and battery plus RTC for standalone mGBA when
 an RTC is available. ThorSync never interprets or fabricates RTC bytes. An
 RTC-only change is retained as a real immutable revision.
 
+Recognized Pokémon Generation III saves receive an additional structural check
+before delivery. If the newest rotating flash-save cycle is incomplete,
+ThorSync archives the exact occurrence but quarantines it instead of replacing
+or propagating the last known-good revision. A later complete write is retried
+automatically.
+
 ## What it does
 
 - Provides a responsive visual library with game status, current source
@@ -38,6 +44,8 @@ RTC-only change is retained as a real immutable revision.
 - Automatically delivers only linear updates. A stale device, simultaneous
   offline play, Syncthing conflict file, invalid size, or unknown mapping
   creates a branch or quarantine state instead of overwriting progress.
+- Prevents interrupted Pokémon Generation III flash-save cycles from replacing
+  or propagating a complete revision.
 - Restores an older revision by creating a new head; later history is never
   erased.
 - Creates manual timeline snapshots without duplicating bytes or pretending an

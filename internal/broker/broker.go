@@ -174,6 +174,24 @@ func (s *Service) Capture(ctx context.Context, input CaptureInput) (store.Ingest
 			}
 			rtcBlob = &rtc
 		}
+		if integrityErr := adapter.ValidatePayload(platform, decoded.Battery); integrityErr != nil {
+			detail := "Quarantined: " + integrityErr.Error() + ". ThorSync will retry automatically after the emulator completes a healthy save."
+			if recordErr := s.store.RecordRejectedIngest(ctx, store.RejectedIngestParams{
+				Binding:         binding,
+				ObservedBlob:    blob,
+				BatteryBlob:     batteryBlob,
+				RTCBlob:         rtcBlob,
+				SourceModified:  input.SourceModified,
+				ObservedAt:      time.Now().UTC(),
+				Provenance:      input.Provenance,
+				ObservationPath: relative,
+				Detail:          detail,
+			}); recordErr != nil {
+				return store.IngestResult{}, recordErr
+			}
+			s.hub.Publish(events.Event{Type: "quarantine", GameID: binding.GameID, Message: integrityErr.Error()})
+			return store.IngestResult{GameID: binding.GameID, State: "quarantined"}, nil
+		}
 	}
 	result, err := s.store.RecordIngest(ctx, store.IngestParams{Binding: binding, ObservedBlob: blob, BatteryBlob: batteryBlob, RTCBlob: rtcBlob, SourceModified: input.SourceModified, ObservedAt: time.Now().UTC(), Provenance: input.Provenance, ForceConflict: forceConflict, ConfirmDelivery: input.ConfirmDelivery, ObservationPath: relative, Detail: input.Detail})
 	if err != nil {

@@ -151,6 +151,7 @@ export interface UnassignedFile {
   detail?: string
   suggestedProfileId?: string
   compatibleProfileIds: string[]
+  reviewOnly?: boolean
 }
 
 export interface DashboardData {

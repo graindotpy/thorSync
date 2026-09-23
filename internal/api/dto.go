@@ -81,6 +81,7 @@ type unassignedDTO struct {
 	Detail               string           `json:"detail,omitempty"`
 	SuggestedProfileID   string           `json:"suggestedProfileId,omitempty"`
 	CompatibleProfileIDs []string         `json:"compatibleProfileIds"`
+	ReviewOnly           bool             `json:"reviewOnly"`
 }
 type endpointDTO struct {
 	ID           string     `json:"id"`
@@ -158,8 +159,11 @@ func toGameDetailDTO(detail model.GameDetail) gameDetailDTO {
 		hasRTC := bindingRevisionHasRTC(detail, binding)
 		state := "paused"
 		var deliveredAt *time.Time
-		if latestObservationAction(detail, binding.EndpointID, binding.RelativePath) == "missing" {
+		latestAction := latestObservationAction(detail, binding.EndpointID, binding.RelativePath)
+		if latestAction == "missing" {
 			state = "missing"
+		} else if latestAction == "quarantined" {
+			state = "paused"
 		} else if binding.LastDeployedRevisionID != "" && binding.LastDeployedRevisionID == detail.CurrentRevisionID {
 			state = "delivered"
 		} else {
@@ -209,6 +213,7 @@ func toEmulatorSettingsDTO(settings model.EmulatorSettings, unassigned []store.U
 }
 
 func toUnassignedDTO(item store.UnassignedFile, windowsGBAProfileID string) unassignedDTO {
+	reviewOnly := strings.HasPrefix(item.Detail, "Quarantined:")
 	result := unassignedDTO{
 		ID:                   item.ID,
 		EndpointID:           item.EndpointID,
@@ -221,11 +226,16 @@ func toUnassignedDTO(item store.UnassignedFile, windowsGBAProfileID string) unas
 		State:                item.State,
 		Detail:               item.Detail,
 		CompatibleProfileIDs: []string{},
+		ReviewOnly:           reviewOnly,
 	}
 	matches := adapter.MatchingProfiles(item.EndpointID, model.PlatformGBA, item.RelativePath, item.Size)
 	matches = append(matches, adapter.MatchingProfiles(item.EndpointID, model.PlatformNDS, item.RelativePath, item.Size)...)
 	for _, profile := range matches {
 		result.CompatibleProfileIDs = append(result.CompatibleProfileIDs, profile.ID)
+	}
+	if reviewOnly {
+		result.CompatibleProfileIDs = []string{}
+		return result
 	}
 	if len(matches) == 1 {
 		result.SuggestedProfileID = matches[0].ID
@@ -263,8 +273,11 @@ func gameDelivery(detail model.GameDetail) (string, string) {
 		return "paused", "Divergent save histories need resolution"
 	}
 	for _, binding := range detail.Bindings {
-		if latestObservationAction(detail, binding.EndpointID, binding.RelativePath) == "missing" {
+		switch latestObservationAction(detail, binding.EndpointID, binding.RelativePath) {
+		case "missing":
 			return "missing", "A mapped save is missing from a device"
+		case "quarantined":
+			return "paused", "An incomplete device save was archived; delivery is paused"
 		}
 	}
 	for _, operation := range detail.Operations {
