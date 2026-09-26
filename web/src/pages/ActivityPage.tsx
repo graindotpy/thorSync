@@ -1,17 +1,7 @@
-import {
-  AlertTriangle,
-  Archive,
-  CheckCircle2,
-  Clock3,
-  Gamepad2,
-  Monitor,
-  RefreshCw,
-  Smartphone,
-  Trash2,
-} from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { PageHeader } from '../components/PageHeader'
-import { fullDate, timeAgo } from '../lib/format'
+import { fullDate } from '../lib/format'
+import { clockTime, dayLabel } from '../lib/present'
 import type { ActivityItem } from '../types'
 
 interface ActivityPageProps {
@@ -19,63 +9,78 @@ interface ActivityPageProps {
   navigate: (path: string) => void
 }
 
-const activityIcons = {
-  capture: Archive,
-  delivery: RefreshCw,
-  conflict: AlertTriangle,
-  restore: Clock3,
-  missing: Trash2,
-  system: CheckCircle2,
+const typeLabels: Record<ActivityItem['type'], string> = {
+  capture: 'Archived',
+  delivery: 'Delivery',
+  conflict: 'Conflict',
+  restore: 'Restore',
+  missing: 'Missing',
+  system: 'System',
 }
 
+type Filter = 'all' | 'saves' | 'system'
+
 export function ActivityPage({ items, navigate }: ActivityPageProps) {
-  const [filter, setFilter] = useState<'all' | 'saves' | 'system'>('all')
-  const filtered = useMemo(
-    () =>
-      items.filter((item) => {
-        if (filter === 'system') return item.type === 'system'
-        if (filter === 'saves') return item.type !== 'system'
-        return true
-      }),
-    [filter, items],
-  )
+  const [filter, setFilter] = useState<Filter>('all')
+
+  const days = useMemo(() => {
+    const filtered = items
+      .filter((item) => (filter === 'system' ? item.type === 'system' : filter === 'saves' ? item.type !== 'system' : true))
+      .sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime())
+    const groups: { label: string; items: ActivityItem[] }[] = []
+    for (const item of filtered) {
+      const label = dayLabel(item.occurredAt)
+      const current = groups[groups.length - 1]
+      if (current?.label === label) current.items.push(item)
+      else groups.push({ label, items: [item] })
+    }
+    return groups
+  }, [filter, items])
 
   return (
     <>
       <PageHeader
-        eyebrow="Observed by ThorSync"
-        title="Recent activity"
-        description="A clear trail of every captured, delivered, and protected change."
+        title="Activity"
+        description="Every save ThorSync archived, delivered, held back or restored, newest first."
         actions={
-          <div className="segmented-control">
+          <div className="segmented" role="group" aria-label="Filter activity">
             {(['all', 'saves', 'system'] as const).map((value) => (
-              <button type="button" key={value} className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>
-                {value === 'all' ? 'Everything' : value === 'saves' ? 'Save events' : 'System'}
+              <button type="button" key={value} aria-pressed={filter === value} onClick={() => setFilter(value)}>
+                {value === 'all' ? 'Everything' : value === 'saves' ? 'Saves' : 'System'}
               </button>
             ))}
           </div>
         }
       />
-      <section className="panel activity-panel">
-        <div className="activity-list">
-          {filtered.map((item) => {
-            const Icon = activityIcons[item.type]
-            return (
-              <article className="activity-row" key={item.id}>
-                <span className={`activity-row__icon activity-row__icon--${item.tone}`}><Icon size={17} /></span>
-                <div className="activity-row__content">
-                  <div><strong>{item.title}</strong><time title={fullDate(item.occurredAt)}>{timeAgo(item.occurredAt)}</time></div>
-                  <p>{item.detail}</p>
-                  <div className="activity-row__tags">
-                    {item.gameTitle && <button type="button" onClick={() => navigate(`/games/${item.gameId}`)}><Gamepad2 size={13} />{item.gameTitle}</button>}
-                    {item.deviceName && <span>{item.deviceName.includes('Thor') ? <Smartphone size={13} /> : <Monitor size={13} />}{item.deviceName}</span>}
+      {days.length === 0 ? (
+        <div className="empty empty--quiet"><h3>Nothing recorded yet</h3><p>Events appear here as soon as either device writes a save.</p></div>
+      ) : (
+        days.map((day) => (
+          <section className="log-day" key={day.label} aria-label={day.label}>
+            <h2 className="log-day__label">{day.label}</h2>
+            <ol className="log">
+              {day.items.map((item) => (
+                <li className={`log__entry log__entry--${item.tone}`} key={item.id}>
+                  <time dateTime={item.occurredAt} title={fullDate(item.occurredAt)}>{clockTime(item.occurredAt)}</time>
+                  <span className="log__type">{typeLabels[item.type]}</span>
+                  <div className="log__body">
+                    <strong>{item.title}</strong>
+                    <p>{item.detail}</p>
+                    {(item.gameTitle || item.deviceName) && (
+                      <p className="log__refs">
+                        {item.gameTitle && item.gameId
+                          ? <button type="button" className="link-button" onClick={() => navigate(`/games/${encodeURIComponent(item.gameId!)}`)}>{item.gameTitle}</button>
+                          : item.gameTitle && <span>{item.gameTitle}</span>}
+                        {item.deviceName && <span>{item.deviceName}</span>}
+                      </p>
+                    )}
                   </div>
-                </div>
-              </article>
-            )
-          })}
-        </div>
-      </section>
+                </li>
+              ))}
+            </ol>
+          </section>
+        ))
+      )}
     </>
   )
 }

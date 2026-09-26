@@ -1,35 +1,28 @@
-import { Gamepad2 } from 'lucide-react'
+import type { CSSProperties } from 'react'
+import { coverCloth, initialOf } from '../lib/present'
 import type { Platform } from '../types'
 
 interface PlatformArtProps {
   platform: Platform
   title: string
-  accent: string
+  seed: string
   size?: 'card' | 'hero' | 'mini'
   artworkUrl?: string
 }
 
-export function PlatformArt({ platform, title, accent, size = 'card', artworkUrl }: PlatformArtProps) {
-  const initials = title
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join('')
-
+// A cloth-bound cover: the game's initial set like a book's ornamental capital.
+export function PlatformArt({ platform, title, seed, size = 'card', artworkUrl }: PlatformArtProps) {
   return (
-    <div
-      className={`platform-art platform-art--${size}`}
-      style={{ '--game-accent': accent } as React.CSSProperties}
-      aria-label={`${title} placeholder artwork`}
-    >
-      {artworkUrl && <img className="platform-art__cover" src={artworkUrl} alt={`${title} custom cover`} />}
-      {!artworkUrl && <>
-      <div className="platform-art__grid" />
-      <span className="platform-art__platform">{platform}</span>
-      <span className="platform-art__initials">{initials}</span>
-      <Gamepad2 className="platform-art__icon" aria-hidden="true" />
-      <span className="platform-art__stripe" />
-      </>}
+    <div className={`cover cover--${size}`} style={{ '--cloth': coverCloth(seed) } as CSSProperties}>
+      {artworkUrl ? (
+        <img className="cover__image" src={artworkUrl} alt={`${title} cover`} />
+      ) : (
+        <div className="cover__cloth" aria-hidden="true">
+          <span className="cover__platform">{platform === 'NDS' ? 'Nintendo DS' : 'Game Boy Advance'}</span>
+          <span className="cover__initial">{initialOf(title)}</span>
+          <span className="cover__rule" />
+        </div>
+      )}
     </div>
   )
 }

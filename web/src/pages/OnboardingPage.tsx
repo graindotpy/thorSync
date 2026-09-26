@@ -1,59 +1,28 @@
-import {
-  ArrowLeft,
-  ArrowRight,
-  Check,
-  CheckCircle2,
-  Cloud,
-  FileJson2,
-  FolderCheck,
-  Gamepad2,
-  HardDrive,
-  Link2,
-  LoaderCircle,
-  LockKeyhole,
-  Monitor,
-  RefreshCw,
-  ShieldCheck,
-  Smartphone,
-  Upload,
-  X,
-  Zap,
-} from 'lucide-react'
-import { useState, type ChangeEvent } from 'react'
+import { ArrowLeft, ArrowRight, Check, ExternalLink, LoaderCircle } from 'lucide-react'
+import { useState } from 'react'
 import { Brand } from '../components/Brand'
-import {
-  completeOnboarding,
-  configureSyncthingFolders,
-  importPlaylist,
-  setWindowsGbaProfile,
-  submitRomHashes,
-  type RomHashRecord,
-} from '../lib/api'
-import type { Endpoint, WindowsGbaProfileId } from '../types'
+import { ImportGames } from '../components/ImportGames'
+import { HealthBadge } from '../components/StatusBadge'
+import { completeOnboarding, configureSyncthingFolders, setWindowsGbaProfile } from '../lib/api'
+import { fileSize } from '../lib/format'
+import type { ArchiveUsage, DiagnosticCheck, Endpoint, WindowsGbaProfileId } from '../types'
 
 interface OnboardingPageProps {
   endpoints: Endpoint[]
   demoMode: boolean
   navigate: (path: string) => void
+  diagnostics?: DiagnosticCheck[]
+  archive?: ArchiveUsage
+  canExit?: boolean
 }
 
-const steps = [
-  { label: 'Server check', icon: Cloud },
-  { label: 'Pair devices', icon: Link2 },
-  { label: 'Choose folders', icon: HardDrive },
-  { label: 'Emulators', icon: Gamepad2 },
-  { label: 'Inventory', icon: RefreshCw },
-  { label: 'Game names', icon: FileJson2 },
-  { label: 'Safety test', icon: ShieldCheck },
-]
+const steps = ['Server check', 'Pair devices', 'Choose folders', 'Emulators', 'Inventory', 'Game names', 'Safety check']
 
-export function OnboardingPage({ endpoints, demoMode, navigate }: OnboardingPageProps) {
+export function OnboardingPage({ endpoints, demoMode, navigate, diagnostics, archive, canExit = false }: OnboardingPageProps) {
   const [step, setStep] = useState(0)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [playlistName, setPlaylistName] = useState<string | null>(null)
-  const [romHashes, setRomHashes] = useState<RomHashRecord[]>([])
   const [hashing, setHashing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [enableDelivery, setEnableDelivery] = useState(true)
   const [thorDeviceId, setThorDeviceId] = useState('')
   const [windowsDeviceId, setWindowsDeviceId] = useState('')
@@ -100,182 +69,188 @@ export function OnboardingPage({ endpoints, demoMode, navigate }: OnboardingPage
     }
   }
 
-  const handlePlaylist = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    setPlaylistName(file.name)
-    setError(null)
-    if (!demoMode) {
-      try {
-        await importPlaylist(file)
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'Playlist import failed')
-      }
-    }
-  }
-
-  const handleRoms = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? [])
-    if (!files.length) return
-    setHashing(true)
-    setError(null)
-    try {
-      const records = await Promise.all(files.map(hashRomLocally))
-      setRomHashes(records)
-      if (!demoMode) await submitRomHashes(records)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not hash the selected files')
-    } finally {
-      setHashing(false)
-      event.target.value = ''
-    }
-  }
+  const last = step === steps.length - 1
 
   return (
-    <div className="onboarding">
-      <header className="onboarding__header">
-        <Brand />
-        <button className="button button--quiet" type="button" onClick={() => navigate('/')}><X size={16} />Exit setup</button>
+    <div className="setup">
+      <header className="masthead">
+        <div className="masthead__inner">
+          <Brand />
+          {canExit && <button className="button button--ghost setup__leave" type="button" onClick={() => navigate('/')}>Leave setup</button>}
+        </div>
       </header>
-      <div className="onboarding__layout">
-        <aside className="setup-steps">
-          <span className="eyebrow">Setup progress</span>
-          <h1>Connect your saves</h1>
-          <p>About five minutes. ThorSync will not overwrite anything during setup.</p>
+
+      <div className="setup__layout">
+        <aside className="setup__contents">
+          <h1>Setting up ThorSync</h1>
+          <p>About five minutes. Nothing is overwritten while you’re here, and delivery stays off until the last step.</p>
           <ol>
-            {steps.map((item, index) => {
-              const Icon = item.icon
-              return (
-                <li key={item.label} className={index === step ? 'active' : index < step ? 'complete' : ''}>
-                  <span>{index < step ? <Check size={15} /> : <Icon size={16} />}</span>
-                  <div><small>Step {index + 1}</small><strong>{item.label}</strong></div>
-                </li>
-              )
-            })}
+            {steps.map((label, index) => (
+              <li key={label} aria-current={index === step ? 'step' : undefined} className={index < step ? 'done' : ''}>
+                <span className="setup__number">{index < step ? <Check size={13} strokeWidth={2.5} /> : String(index + 1).padStart(2, '0')}</span>
+                {label}
+              </li>
+            ))}
           </ol>
-          <div className="setup-steps__safety"><LockKeyhole size={17} /><span><strong>Import mode is safe by default</strong><small>Delivery stays off until the final compatibility check passes.</small></span></div>
         </aside>
 
-        <main className="setup-content">
-          <div className="setup-content__progress"><span style={{ width: `${((step + 1) / steps.length) * 100}%` }} /></div>
-          <div className="setup-content__body">
-            <StepContent
-              step={step}
-              endpoints={endpoints}
-              playlistName={playlistName}
-              romHashes={romHashes}
-              hashing={hashing}
-              enableDelivery={enableDelivery}
-              setEnableDelivery={setEnableDelivery}
-              thorDeviceId={thorDeviceId}
-              windowsDeviceId={windowsDeviceId}
-              setThorDeviceId={setThorDeviceId}
-              setWindowsDeviceId={setWindowsDeviceId}
-              windowsGbaProfile={windowsGbaProfile}
-              setWindowsGbaProfile={setWindowsGbaProfileState}
-              emulatorClosed={emulatorClosed}
-              setEmulatorClosed={setEmulatorClosed}
-              onPlaylist={handlePlaylist}
-              onRoms={handleRoms}
-            />
-            {error && <p className="form-error"><X size={14} />{error}</p>}
+        <section className="setup__panel">
+          <div className="setup__progress" aria-hidden="true"><span style={{ width: `${((step + 1) / steps.length) * 100}%` }} /></div>
+          <div className="setup__body">
+            <p className="setup__step">Step {step + 1} of {steps.length}</p>
+            {step === 0 && <ServerCheck diagnostics={diagnostics} archive={archive} />}
+            {step === 1 && <PairDevices endpoints={endpoints} thorDeviceId={thorDeviceId} windowsDeviceId={windowsDeviceId} setThorDeviceId={setThorDeviceId} setWindowsDeviceId={setWindowsDeviceId} />}
+            {step === 2 && <FolderSetup />}
+            {step === 3 && <EmulatorProfiles windowsGbaProfile={windowsGbaProfile} setWindowsGbaProfile={setWindowsGbaProfileState} emulatorClosed={emulatorClosed} setEmulatorClosed={setEmulatorClosed} />}
+            {step === 4 && <Inventory />}
+            {step === 5 && <><StepHeading title="Give your saves game names" copy="Import a RetroArch playlist, or hash your ROMs here in the browser. You can skip this and do it later from the library." /><ImportGames demoMode={demoMode} onBusyChange={setHashing} /></>}
+            {step === 6 && <SafetyCheck enableDelivery={enableDelivery} setEnableDelivery={setEnableDelivery} />}
+            {error && <p className="form-error" role="alert">{error}</p>}
           </div>
-          <footer className="setup-content__footer">
-            <button className="button button--quiet" type="button" disabled={step === 0 || busy} onClick={() => setStep((value) => value - 1)}><ArrowLeft size={16} />Back</button>
-            <span>Step {step + 1} of {steps.length}</span>
-            <button className="button button--primary" type="button" disabled={busy || hashing} onClick={() => void goNext()}>{busy ? <LoaderCircle size={16} className="spin-slow" /> : step === steps.length - 1 ? <Zap size={16} /> : null}{step === steps.length - 1 ? 'Finish setup' : 'Continue'}{step < steps.length - 1 && <ArrowRight size={16} />}</button>
+          <footer className="setup__footer">
+            <button className="button button--ghost" type="button" disabled={step === 0 || busy} onClick={() => { setError(null); setStep((value) => value - 1) }}><ArrowLeft size={16} />Back</button>
+            <button className="button button--primary" type="button" disabled={busy || hashing} onClick={() => void goNext()}>
+              {busy && <LoaderCircle size={16} className="spin" />}
+              {last ? 'Finish setup' : 'Continue'}
+              {!last && <ArrowRight size={16} />}
+            </button>
           </footer>
-        </main>
+        </section>
       </div>
     </div>
   )
 }
 
-interface StepContentProps {
-  step: number
-  endpoints: Endpoint[]
-  playlistName: string | null
-  romHashes: RomHashRecord[]
-  hashing: boolean
-  enableDelivery: boolean
-  setEnableDelivery: (value: boolean) => void
-  thorDeviceId: string
-  windowsDeviceId: string
-  setThorDeviceId: (value: string) => void
-  setWindowsDeviceId: (value: string) => void
-  windowsGbaProfile: WindowsGbaProfileId
-  setWindowsGbaProfile: (value: WindowsGbaProfileId) => void
-  emulatorClosed: boolean
-  setEmulatorClosed: (value: boolean) => void
-  onPlaylist: (event: ChangeEvent<HTMLInputElement>) => void
-  onRoms: (event: ChangeEvent<HTMLInputElement>) => void
+function StepHeading({ title, copy }: { title: string; copy: string }) {
+  return <div className="setup__heading"><h2>{title}</h2><p>{copy}</p></div>
 }
 
-function StepContent(props: StepContentProps) {
-  if (props.step === 0) return <ServerCheck />
-  if (props.step === 1) return <PairDevices endpoints={props.endpoints} thorDeviceId={props.thorDeviceId} windowsDeviceId={props.windowsDeviceId} setThorDeviceId={props.setThorDeviceId} setWindowsDeviceId={props.setWindowsDeviceId} />
-  if (props.step === 2) return <FolderSetup />
-  if (props.step === 3) return <EmulatorProfiles windowsGbaProfile={props.windowsGbaProfile} setWindowsGbaProfile={props.setWindowsGbaProfile} emulatorClosed={props.emulatorClosed} setEmulatorClosed={props.setEmulatorClosed} />
-  if (props.step === 4) return <Inventory />
-  if (props.step === 5) return <GameImport {...props} />
-  return <SafetyTest enableDelivery={props.enableDelivery} setEnableDelivery={props.setEnableDelivery} />
+function Checklist({ items }: { items: { label: string; value: string }[] }) {
+  return (
+    <ul className="checklist">
+      {items.map((item) => <li key={item.label}><Check size={14} strokeWidth={2.5} aria-hidden="true" /><strong>{item.label}</strong><span>{item.value}</span></li>)}
+    </ul>
+  )
 }
 
-function SetupHeading({ icon, eyebrow, title, copy }: { icon: React.ReactNode; eyebrow: string; title: string; copy: string }) {
-  return <div className="setup-heading"><span>{icon}</span><div><small>{eyebrow}</small><h2>{title}</h2><p>{copy}</p></div></div>
-}
-
-function ServerCheck() {
-  return <><SetupHeading icon={<Cloud size={23} />} eyebrow="Start here" title="Check the ZimaOS hub" copy="ThorSync needs a writable archive and a healthy connection to the local Syncthing API." /><div className="validation-list"><ValidationRow label="Metadata directory" value="Writable · SQLite WAL ready" /><ValidationRow label="Revision archive" value="Writable · 86 GB available" /><ValidationRow label="Syncthing API" value="Connected · event stream ready" /><ValidationRow label="Free-space reserve" value="1 GiB protected" /></div><div className="inline-note"><ShieldCheck size={17} /><p>This check reads configuration and storage only. It does not move or alter save files.</p></div></>
+function ServerCheck({ diagnostics, archive }: { diagnostics?: DiagnosticCheck[]; archive?: ArchiveUsage }) {
+  return (
+    <>
+      <StepHeading title="Check the ZimaOS hub" copy="ThorSync needs a writable archive and a working connection to the local Syncthing API." />
+      {diagnostics?.length ? (
+        <ul className="check-list">
+          {diagnostics.map((check) => (
+            <li className={`check check--${check.state}`} key={check.id}>
+              <div className="check__copy"><strong>{check.name}</strong><p>{check.detail}</p></div>
+              <div className="check__state"><HealthBadge state={check.state} /></div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Checklist items={[
+          { label: 'Metadata directory', value: 'Writable · SQLite WAL ready' },
+          { label: 'Revision archive', value: 'Writable' },
+          { label: 'Syncthing API', value: 'Connected · event stream ready' },
+        ]} />
+      )}
+      {archive && <p className="help">{fileSize(archive.freeBytes)} free on the archive disk, with {fileSize(archive.reserveBytes)} held back as a safety reserve.</p>}
+      <p className="aside-note">This step only reads configuration and storage. It doesn’t touch any save files.</p>
+    </>
+  )
 }
 
 function PairDevices({ endpoints, thorDeviceId, windowsDeviceId, setThorDeviceId, setWindowsDeviceId }: { endpoints: Endpoint[]; thorDeviceId: string; windowsDeviceId: string; setThorDeviceId: (value: string) => void; setWindowsDeviceId: (value: string) => void }) {
-  const devices = endpoints.length ? endpoints : [{ id: 'thor', name: 'AYN Thor', kind: 'thor', status: 'offline' }, { id: 'windows', name: 'Gaming PC', kind: 'windows', status: 'offline' }]
+  const devices = endpoints.length ? endpoints : [{ id: 'thor', name: 'AYN Thor', status: 'offline' as const }, { id: 'windows', name: 'Gaming PC', status: 'offline' as const }]
   const openSyncthing = () => window.open(`${window.location.protocol}//${window.location.hostname}:8384`, '_blank', 'noopener,noreferrer')
-  return <><SetupHeading icon={<Link2 size={23} />} eyebrow="Syncthing pairing" title="Connect both playing devices" copy="Pair each device directly with the ZimaOS Syncthing node. Your handheld and PC do not share folders with one another." /><div className="pairing-diagram"><div><span><Smartphone size={25} /></span><strong>AYN Thor</strong><small>BasicSync</small></div><i /><div className="pairing-diagram__hub"><span><Cloud size={27} /></span><strong>ZimaOS hub</strong><small>Syncthing + ThorSync</small></div><i /><div><span><Monitor size={25} /></span><strong>Gaming PC</strong><small>Syncthing</small></div></div><div className="device-id-grid"><label><span>AYN Thor device ID</span><input value={thorDeviceId} onChange={(event) => setThorDeviceId(event.target.value)} placeholder="AAAAAAA-BBBBBBB-…" autoComplete="off" /></label><label><span>Windows PC device ID</span><input value={windowsDeviceId} onChange={(event) => setWindowsDeviceId(event.target.value)} placeholder="CCCCCCC-DDDDDDD-…" autoComplete="off" /></label></div><div className="validation-list compact">{devices.map((device) => <ValidationRow key={device.id} label={device.name} value={device.status === 'healthy' ? 'Paired and reachable' : 'Enter its Syncthing device ID'} />)}</div><button type="button" className="button button--quiet" onClick={openSyncthing}><Link2 size={16} />Open Syncthing pairing</button></>
+  return (
+    <>
+      <StepHeading title="Connect both playing devices" copy="Pair each device directly with the Syncthing node on ZimaOS. The Thor and the PC never share a folder with each other." />
+      <figure className="topology topology--compact" aria-label="Pairing layout">
+        <div className="topology__node"><strong>AYN Thor</strong><small>BasicSync</small></div>
+        <span className="topology__wire" aria-hidden="true" />
+        <div className="topology__node topology__node--hub"><strong>ZimaOS hub</strong><small>Syncthing + ThorSync</small></div>
+        <span className="topology__wire" aria-hidden="true" />
+        <div className="topology__node"><strong>Gaming PC</strong><small>Syncthing</small></div>
+      </figure>
+      <div className="field-pair">
+        <label className="field"><span>AYN Thor device ID</span><input value={thorDeviceId} onChange={(event) => setThorDeviceId(event.target.value)} placeholder="AAAAAAA-BBBBBBB-…" autoComplete="off" spellCheck={false} /></label>
+        <label className="field"><span>Windows PC device ID</span><input value={windowsDeviceId} onChange={(event) => setWindowsDeviceId(event.target.value)} placeholder="CCCCCCC-DDDDDDD-…" autoComplete="off" spellCheck={false} /></label>
+      </div>
+      <ul className="device-status">
+        {devices.map((device) => <li key={device.id}><strong>{device.name}</strong><span>{device.status === 'healthy' ? 'Paired and reachable' : 'Enter its Syncthing device ID above'}</span></li>)}
+      </ul>
+      <button type="button" className="button button--ghost" onClick={openSyncthing}>Open Syncthing<ExternalLink size={14} /></button>
+    </>
+  )
 }
 
 function FolderSetup() {
-  return <><SetupHeading icon={<HardDrive size={23} />} eyebrow="Isolated folders" title="Keep each endpoint separate" copy="ThorSync watches a dedicated hub folder for each device so .srm and .sav names never collide." /><div className="folder-cards"><div><span><Smartphone size={20} /></span><div><strong>Thor saves</strong><code>/sync/thor</code><small>Device path: Emulation/Saves</small></div><CheckCircle2 size={18} /></div><div><span><Monitor size={20} /></span><div><strong>Windows saves</strong><code>/sync/windows</code><small>Choose your emulator save folder</small></div><CheckCircle2 size={18} /></div></div><div className="inline-note"><FolderCheck size={17} /><p>On Android, use ordinary shared storage. Private app and <code>Android/data</code> folders cannot be accessed reliably.</p></div></>
+  return (
+    <>
+      <StepHeading title="Keep each endpoint separate" copy="ThorSync watches one hub folder per device, so .srm and .sav files with the same name never collide." />
+      <table className="plain-table">
+        <thead><tr><th scope="col">Device</th><th scope="col">Hub folder</th><th scope="col">On the device</th></tr></thead>
+        <tbody>
+          <tr><td>AYN Thor</td><td><code>/sync/thor</code></td><td>Emulation/Saves</td></tr>
+          <tr><td>Windows PC</td><td><code>/sync/windows</code></td><td>Your emulator’s save folder</td></tr>
+        </tbody>
+      </table>
+      <p className="aside-note">On Android, use ordinary shared storage. Private app folders and <code>Android/data</code> can’t be read reliably.</p>
+    </>
+  )
 }
 
 function EmulatorProfiles({ windowsGbaProfile, setWindowsGbaProfile, emulatorClosed, setEmulatorClosed }: { windowsGbaProfile: WindowsGbaProfileId; setWindowsGbaProfile: (value: WindowsGbaProfileId) => void; emulatorClosed: boolean; setEmulatorClosed: (value: boolean) => void }) {
   const windowsLabel = windowsGbaProfile === 'windows-mgba' ? 'Standalone mGBA (.sav + RTC)' : 'VBA-M (.sav)'
-  return <><SetupHeading icon={<Gamepad2 size={23} />} eyebrow="Format-aware adapters" title="Choose your Windows GBA emulator" copy="ThorSync keeps mGBA’s RTC state in history while sending RetroArch only the raw battery bytes it supports." /><div className="emulator-options" role="radiogroup" aria-label="Windows GBA emulator"><label className={windowsGbaProfile === 'windows-mgba' ? 'selected' : ''}><input type="radio" checked={windowsGbaProfile === 'windows-mgba'} onChange={() => setWindowsGbaProfile('windows-mgba')} /><span><strong>Standalone mGBA <em>Recommended</em></strong><small>Raw and 16-byte RTC-wrapped saves are handled automatically.</small></span></label><label className={windowsGbaProfile === 'windows-vbam' ? 'selected' : ''}><input type="radio" checked={windowsGbaProfile === 'windows-vbam'} onChange={() => setWindowsGbaProfile('windows-vbam')} /><span><strong>VBA-M</strong><small>Raw battery saves only.</small></span></label></div><div className="profile-table"><div className="profile-table__head"><span>Platform</span><span>AYN Thor</span><span>Windows</span><span /></div><ProfileRow platform="GBA" thor="RetroArch · mGBA (.srm)" windows={windowsLabel} /><ProfileRow platform="NDS" thor="RetroArch · melonDS (.srm)" windows="melonDS (.sav)" /></div><label className="enable-delivery"><input type="checkbox" checked={emulatorClosed} onChange={(event) => setEmulatorClosed(event.target.checked)} /><span><strong>I have closed all emulators</strong><small>ThorSync may immediately re-check existing mapped saves.</small></span></label><div className="inline-note"><ShieldCheck size={17} /><p>The original file and opaque RTC bytes are archived before ThorSync materializes either target format.</p></div></>
-}
-
-function ProfileRow({ platform, thor, windows }: { platform: string; thor: string; windows: string }) {
-  return <div className="profile-table__row"><strong>{platform}</strong><span>{thor}</span><span>{windows}</span><CheckCircle2 size={18} /></div>
+  return (
+    <>
+      <StepHeading title="Choose your Windows GBA emulator" copy="ThorSync keeps mGBA’s RTC data in history, and sends RetroArch only the raw battery bytes it understands." />
+      <div className="choices" role="radiogroup" aria-label="Windows GBA emulator">
+        <label className="choice"><input type="radio" checked={windowsGbaProfile === 'windows-mgba'} onChange={() => setWindowsGbaProfile('windows-mgba')} /><span><strong>Standalone mGBA <em>Recommended</em></strong><small>Raw and 16-byte RTC-wrapped saves are handled automatically.</small></span></label>
+        <label className="choice"><input type="radio" checked={windowsGbaProfile === 'windows-vbam'} onChange={() => setWindowsGbaProfile('windows-vbam')} /><span><strong>VBA-M</strong><small>Raw battery saves only.</small></span></label>
+      </div>
+      <table className="plain-table">
+        <thead><tr><th scope="col">System</th><th scope="col">AYN Thor</th><th scope="col">Windows</th></tr></thead>
+        <tbody>
+          <tr><td>GBA</td><td>RetroArch · mGBA (.srm)</td><td>{windowsLabel}</td></tr>
+          <tr><td>NDS</td><td>RetroArch · melonDS (.srm)</td><td>melonDS (.sav)</td></tr>
+        </tbody>
+      </table>
+      <label className="confirm-check">
+        <input type="checkbox" checked={emulatorClosed} onChange={(event) => setEmulatorClosed(event.target.checked)} />
+        <span><strong>I have closed all emulators</strong><small>ThorSync may re-check existing mapped saves straight away.</small></span>
+      </label>
+      <p className="aside-note">The original file and any opaque RTC bytes are archived before ThorSync writes either target format.</p>
+    </>
+  )
 }
 
 function Inventory() {
-  return <><SetupHeading icon={<RefreshCw size={23} />} eyebrow="Read-only scan" title="Inventory existing saves" copy="ThorSync archives every discovered version before asking which one should become the shared baseline." /><div className="scan-list"><div><span className="scan-dot scan-dot--ok" /><div><strong>Identical content is deduplicated safely</strong><p>Every device observation keeps its own provenance even when the archived bytes match.</p></div><Check size={18} /></div><div><span className="scan-dot scan-dot--warn" /><div><strong>Unknown saves remain unassigned</strong><p>They stay archived and visible for manual game mapping; ThorSync will not deliver them automatically.</p></div><ArrowRight size={18} /></div></div></>
+  return (
+    <>
+      <StepHeading title="Inventory existing saves" copy="A read-only scan. ThorSync archives every version it finds before asking which one should become the shared starting point." />
+      <Checklist items={[
+        { label: 'Identical files are stored once', value: 'Each device’s copy still keeps its own record of where it came from.' },
+        { label: 'Unknown saves wait in Review', value: 'They’re archived and listed for you to match to a game. Nothing unknown is delivered.' },
+      ]} />
+    </>
+  )
 }
 
-function GameImport({ playlistName, romHashes, hashing, onPlaylist, onRoms }: StepContentProps) {
-  return <><SetupHeading icon={<FileJson2 size={23} />} eyebrow="Metadata only" title="Give your saves game names" copy="Import a RetroArch playlist, or hash local ROMs in this browser. ROM bytes never leave this device." /><div className="import-options"><label className="upload-card"><input type="file" accept=".lpl,application/json" onChange={onPlaylist} /><span><FileJson2 size={22} /></span><div><strong>{playlistName ?? 'RetroArch playlist'}</strong><p>{playlistName ? 'Ready to match' : 'Choose an .lpl file with paths and labels'}</p></div>{playlistName ? <CheckCircle2 className="upload-card__done" size={19} /> : <Upload size={18} />}</label><label className="upload-card"><input type="file" accept=".gba,.nds" multiple onChange={onRoms} /><span><Gamepad2 size={22} /></span><div><strong>{hashing ? 'Hashing locally…' : 'Local ROM hashes'}</strong><p>{romHashes.length ? `${romHashes.length} hashes ready · no ROMs uploaded` : 'Choose .gba or .nds files'}</p></div>{hashing ? <LoaderCircle className="spin-slow" size={18} /> : romHashes.length ? <CheckCircle2 className="upload-card__done" size={19} /> : <Upload size={18} />}</label></div>{romHashes.length > 0 && <div className="hash-list">{romHashes.slice(0, 4).map((record) => <div key={`${record.filename}-${record.sha1}`}><span>{record.filename}</span><code>SHA-1 {record.sha1.slice(0, 12)}…</code><code>CRC32 {record.crc32}</code></div>)}</div>}<div className="privacy-note"><LockKeyhole size={17} /><p>Only filenames, sizes, and CRC32/SHA-1 values are submitted for matching against the licensed Libretro subset.</p></div></>
-}
-
-function SafetyTest({ enableDelivery, setEnableDelivery }: { enableDelivery: boolean; setEnableDelivery: (value: boolean) => void }) {
-  return <><SetupHeading icon={<ShieldCheck size={23} />} eyebrow="Final safety check" title="Ready to leave import mode" copy="ThorSync will only move a mapped save after its profile, extension, and size pass validation." /><div className="final-check"><span><CheckCircle2 size={33} /></span><h3>Safety controls active</h3><p>Unsupported or ambiguous files are archived and quarantined instead of delivered.</p></div><div className="validation-list compact"><ValidationRow label="Archive-before-write" value="Every delivery starts from an immutable revision" /><ValidationRow label="Device baselines" value="Tracked independently for each endpoint" /><ValidationRow label="Write-loop protection" value="Idempotent operation journal ready" /><ValidationRow label="Quiescence checks" value="5 seconds · two observations" /></div><label className="enable-delivery"><input type="checkbox" checked={enableDelivery} onChange={(event) => setEnableDelivery(event.target.checked)} /><span><strong>Enable automatic delivery after setup</strong><small>Only validated linear updates move automatically. Divergent histories always pause.</small></span></label></>
-}
-
-function ValidationRow({ label, value }: { label: string; value: string }) {
-  return <div><span><Check size={14} /></span><strong>{label}</strong><small>{value}</small></div>
-}
-
-async function hashRomLocally(file: File): Promise<RomHashRecord> {
-  const bytes = await file.arrayBuffer()
-  const digest = await crypto.subtle.digest('SHA-1', bytes)
-  const sha1 = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')
-  return { filename: file.name, size: file.size, sha1, crc32: crc32(new Uint8Array(bytes)) }
-}
-
-function crc32(bytes: Uint8Array): string {
-  let crc = 0xffffffff
-  for (const byte of bytes) {
-    crc ^= byte
-    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
-  }
-  return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0').toUpperCase()
+function SafetyCheck({ enableDelivery, setEnableDelivery }: { enableDelivery: boolean; setEnableDelivery: (value: boolean) => void }) {
+  return (
+    <>
+      <StepHeading title="Ready to leave import mode" copy="From here, ThorSync only moves a mapped save once its emulator profile, extension and size all check out." />
+      <Checklist items={[
+        { label: 'Archive before write', value: 'Every delivery starts from an immutable revision' },
+        { label: 'Per-device baselines', value: 'Tracked separately for each device' },
+        { label: 'Write-loop protection', value: 'Idempotent operation journal ready' },
+        { label: 'Quiet period', value: '5 seconds · two matching observations' },
+      ]} />
+      <label className="confirm-check">
+        <input type="checkbox" checked={enableDelivery} onChange={(event) => setEnableDelivery(event.target.checked)} />
+        <span><strong>Enable automatic delivery after setup</strong><small>Only straightforward updates move automatically. Diverging saves always pause.</small></span>
+      </label>
+    </>
+  )
 }

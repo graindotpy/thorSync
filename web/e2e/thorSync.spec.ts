@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
+const mainNav = (page: Page) => page.getByRole('navigation', { name: 'Main navigation' })
+
 async function useDemoData(page: Page) {
   await page.route('**/api/v1/**', (route) => route.abort('connectionrefused'))
 }
@@ -10,7 +12,7 @@ test.beforeEach(async ({ page }) => {
 
 test('filters and searches the visual game library', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: /^Open / })).toHaveCount(6)
 
   await page.getByRole('group', { name: 'Filter games' }).getByRole('button', { name: 'NDS' }).click()
@@ -43,12 +45,12 @@ test('walks through onboarding without enabling delivery early', async ({ page }
   await expect(page.getByRole('checkbox', { name: /Enable automatic delivery/ })).toBeChecked()
   await page.getByRole('button', { name: 'Finish setup' }).click()
   await expect(page).toHaveURL(/\/$/)
-  await expect(page.getByRole('heading', { name: 'Welcome back' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible()
 })
 
 test('promotes a protected conflict branch only after acknowledgement', async ({ page }) => {
   await page.goto('/')
-  await page.locator('.sidebar__nav').getByRole('button', { name: /Conflicts/ }).click()
+  await mainNav(page).getByRole('button', { name: /Review/ }).click()
   const card = page.locator('.conflict-card').filter({ hasText: 'Amber Circuit' })
   await expect(card).toBeVisible()
   await card.getByRole('button', { name: 'Choose this save' }).nth(1).click()
@@ -108,10 +110,10 @@ test('confirms an existing-install mGBA setup and clears its recovered quarantin
     return route.fulfill({ status: 404, body: 'not found' })
   })
 
-  await page.goto('/unassigned')
+  await page.goto('/review')
   await expect(page.getByText('Pokemon Lazarus.sav')).toBeVisible()
   await expect(page.getByText('Standalone mGBA RTC format detected')).toBeVisible()
-  await page.locator('.sidebar__footer').getByRole('button', { name: 'Settings' }).click()
+  await mainNav(page).getByRole('button', { name: 'Settings' }).click()
   await expect(page.getByText('One-time setup required.', { exact: false })).toBeVisible()
 
   await page.getByRole('button', { name: 'Save preferences' }).click()
@@ -120,7 +122,7 @@ test('confirms an existing-install mGBA setup and clears its recovered quarantin
   await page.getByRole('button', { name: 'Save preferences' }).click()
   await expect.poll(() => updateBody).toEqual({ profileId: 'windows-mgba', emulatorClosed: true, applyToExisting: true })
 
-  await page.locator('.sidebar__nav').getByRole('button', { name: 'Unassigned' }).click()
+  await mainNav(page).getByRole('button', { name: /Review/ }).click()
   await expect(page.getByRole('heading', { name: 'Everything is assigned' })).toBeVisible()
 })
 
@@ -135,4 +137,24 @@ test('changes one game to VBA-M only after the emulator-closed acknowledgement',
   await page.getByRole('checkbox', { name: /closed this game in every emulator/ }).check()
   await update.click()
   await expect(page.locator('.toast')).toContainText('Windows profile changed to VBA-M')
+})
+
+test('redirects the retired page addresses to their new homes', async ({ page }) => {
+  await page.goto('/conflicts')
+  await expect(page).toHaveURL(/\/review$/)
+  await expect(page.getByRole('heading', { name: 'Review', exact: true })).toBeVisible()
+
+  await page.goto('/diagnostics')
+  await expect(page).toHaveURL(/\/system$/)
+  await expect(page.getByRole('heading', { name: 'Health checks' })).toBeVisible()
+})
+
+test('keeps every section reachable from the phone tab bar', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.goto('/')
+  const tabs = page.getByRole('navigation', { name: 'Mobile navigation' })
+  for (const [label, heading] of [['Review', 'Review'], ['Activity', 'Activity'], ['System', 'System'], ['Settings', 'Settings'], ['Library', 'Library']]) {
+    await tabs.getByRole('button', { name: label }).click()
+    await expect(page.getByRole('heading', { name: heading, exact: true, level: 1 })).toBeVisible()
+  }
 })

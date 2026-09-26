@@ -1,35 +1,24 @@
-import {
-  Activity,
-  AlertTriangle,
-  Gamepad2,
-  FileQuestion,
-  HardDrive,
-  HeartPulse,
-  Menu,
-  PanelLeftClose,
-  Settings,
-  ShieldCheck,
-  X,
-} from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { History, Inbox, Library, Server, SlidersHorizontal } from 'lucide-react'
+import type { ReactNode } from 'react'
+import type { SystemHealth } from '../lib/present'
 import { Brand } from './Brand'
 
 interface ShellProps {
   children: ReactNode
   path: string
   navigate: (path: string) => void
-  conflictCount: number
+  reviewCount: number
   isDemo: boolean
   liveConnected: boolean
+  health: SystemHealth
 }
 
 const navigation = [
-  { label: 'Library', path: '/', icon: Gamepad2 },
-  { label: 'Activity', path: '/activity', icon: Activity },
-  { label: 'Conflicts', path: '/conflicts', icon: AlertTriangle, badge: true },
-  { label: 'Devices', path: '/devices', icon: HardDrive },
-  { label: 'Unassigned', path: '/unassigned', icon: FileQuestion },
-  { label: 'Diagnostics', path: '/diagnostics', icon: HeartPulse },
+  { label: 'Library', path: '/', icon: Library },
+  { label: 'Review', path: '/review', icon: Inbox, badge: true },
+  { label: 'Activity', path: '/activity', icon: History },
+  { label: 'System', path: '/system', icon: Server },
+  { label: 'Settings', path: '/settings', icon: SlidersHorizontal },
 ]
 
 function isActive(current: string, target: string) {
@@ -37,143 +26,68 @@ function isActive(current: string, target: string) {
   return current.startsWith(target)
 }
 
-export function Shell({
-  children,
-  path,
-  navigate,
-  conflictCount,
-  isDemo,
-  liveConnected,
-}: ShellProps) {
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [sidebarCompact, setSidebarCompact] = useState(false)
-
-  useEffect(() => setMenuOpen(false), [path])
-
-  const go = (next: string) => {
-    navigate(next)
-    setMenuOpen(false)
-  }
+export function Shell({ children, path, navigate, reviewCount, isDemo, liveConnected, health }: ShellProps) {
+  const connection = isDemo ? 'Demo data' : liveConnected ? 'Live' : 'Reconnecting'
+  const statusTone = health.state !== 'healthy' ? health.state : isDemo || !liveConnected ? 'degraded' : 'healthy'
 
   return (
-    <div className={`app-shell ${sidebarCompact ? 'app-shell--compact' : ''}`}>
-      <aside className={`sidebar ${menuOpen ? 'sidebar--open' : ''}`}>
-        <div className="sidebar__top">
-          <Brand compact={sidebarCompact} />
-          <button
-            className="icon-button sidebar__close-mobile"
-            type="button"
-            aria-label="Close navigation"
-            onClick={() => setMenuOpen(false)}
-          >
-            <X size={20} />
+    <div className="app">
+      <a className="skip-link" href="#main">Skip to content</a>
+      <header className="masthead">
+        <div className="masthead__inner">
+          <button type="button" className="masthead__brand" onClick={() => navigate('/')} aria-label="ThorSync library">
+            <Brand />
           </button>
-        </div>
-
-        <nav className="sidebar__nav" aria-label="Main navigation">
-          {navigation.map((item) => {
-            const Icon = item.icon
-            return (
+          <nav className="masthead__nav" aria-label="Main navigation">
+            {navigation.map((item) => (
               <button
                 type="button"
                 key={item.path}
-                className={`nav-item ${isActive(path, item.path) ? 'nav-item--active' : ''}`}
-                onClick={() => go(item.path)}
+                className="masthead__link"
                 aria-current={isActive(path, item.path) ? 'page' : undefined}
-                title={sidebarCompact ? item.label : undefined}
+                onClick={() => navigate(item.path)}
               >
-                <Icon size={19} />
-                <span>{item.label}</span>
-                {item.badge && conflictCount > 0 && (
-                  <span className="nav-item__badge">{conflictCount}</span>
-                )}
+                {item.label}
+                {item.badge && reviewCount > 0 && <span className="count-badge" aria-label={`${reviewCount} waiting`}>{reviewCount}</span>}
               </button>
-            )
-          })}
-        </nav>
-
-        <div className="sidebar__footer">
-          <button
-            type="button"
-            className="nav-item"
-            onClick={() => go('/settings')}
-            title={sidebarCompact ? 'Settings' : undefined}
-          >
-            <Settings size={19} />
-            <span>Settings</span>
-          </button>
-          <div className="sidebar__server" title="ZimaOS server status">
-            <span className="status-light status-light--ok" />
-            {!sidebarCompact && (
-              <span>
-                <strong>ZimaOS</strong>
-                <small>Broker is healthy</small>
-              </span>
-            )}
-          </div>
-          <button
-            type="button"
-            className="sidebar__collapse"
-            onClick={() => setSidebarCompact((value) => !value)}
-            aria-label={sidebarCompact ? 'Expand sidebar' : 'Collapse sidebar'}
-          >
-            <PanelLeftClose size={17} />
-            {!sidebarCompact && <span>Collapse</span>}
+            ))}
+          </nav>
+          <button type="button" className={`masthead__status masthead__status--${statusTone}`} onClick={() => navigate('/system')} title="Open system status">
+            <span className="state__dot" aria-hidden="true" />
+            <span className="masthead__status-text">{connection}<span aria-hidden="true"> · </span>{health.label}</span>
           </button>
         </div>
-      </aside>
+      </header>
 
-      {menuOpen && <button className="sidebar-scrim" aria-label="Close menu" onClick={() => setMenuOpen(false)} />}
+      {isDemo && (
+        <div className="notice-bar" role="status">
+          The ThorSync API isn’t reachable, so you’re looking at demo data. Nothing you do here changes real saves.
+        </div>
+      )}
+      {!isDemo && !liveConnected && (
+        <div className="notice-bar notice-bar--quiet" role="status">
+          Live updates are reconnecting. The figures below are still current as of the last refresh.
+        </div>
+      )}
 
-      <div className="app-main">
-        <header className="mobile-header">
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="Open navigation"
-            onClick={() => setMenuOpen(true)}
-          >
-            <Menu size={21} />
-          </button>
-          <Brand />
-          <span className={`live-pill ${liveConnected && !isDemo ? 'live-pill--connected' : ''}`}>
-            <span />
-            {isDemo ? 'Demo' : liveConnected ? 'Live' : 'Polling'}
-          </span>
-        </header>
+      <main id="main" className="page">{children}</main>
 
-        {(isDemo || !liveConnected) && (
-          <div className="connection-banner" role="status">
-            {isDemo ? (
-              <>
-                <ShieldCheck size={15} /> Demo data is shown while the ThorSync API is unavailable.
-              </>
-            ) : (
-              <>
-                <span className="status-light status-light--warning" /> Live updates reconnecting; data remains available.
-              </>
-            )}
-          </div>
-        )}
-
-        <main className="page-wrap">{children}</main>
-      </div>
-
-      <nav className="bottom-nav" aria-label="Mobile navigation">
-        {navigation.filter((item) => item.path !== '/unassigned').slice(0, 5).map((item) => {
+      <nav className="tabbar" aria-label="Mobile navigation">
+        {navigation.map((item) => {
           const Icon = item.icon
           return (
             <button
               key={item.path}
               type="button"
-              className={isActive(path, item.path) ? 'bottom-nav__item--active' : ''}
-              onClick={() => go(item.path)}
+              className="tabbar__item"
+              aria-current={isActive(path, item.path) ? 'page' : undefined}
+              onClick={() => navigate(item.path)}
             >
-              <span className="bottom-nav__icon">
-                <Icon size={19} />
-                {item.badge && conflictCount > 0 && <i>{conflictCount}</i>}
+              <span className="tabbar__icon">
+                <Icon size={20} strokeWidth={1.6} />
+                {item.badge && reviewCount > 0 && <i>{reviewCount}</i>}
               </span>
-              <small>{item.label}</small>
+              <span>{item.label}</span>
             </button>
           )
         })}

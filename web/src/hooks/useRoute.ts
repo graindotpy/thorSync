@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 export interface RouteState {
   path: string
-  navigate: (path: string) => void
+  navigate: (path: string, options?: { replace?: boolean }) => void
 }
 
 export function useRoute(): RouteState {
@@ -14,10 +14,11 @@ export function useRoute(): RouteState {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
-  const navigate = useCallback((nextPath: string) => {
-    if (window.location.pathname !== nextPath) window.history.pushState({}, '', nextPath)
+  const navigate = useCallback((nextPath: string, options?: { replace?: boolean }) => {
+    if (options?.replace) window.history.replaceState({}, '', nextPath)
+    else if (window.location.pathname !== nextPath) window.history.pushState({}, '', nextPath)
     setPath(nextPath)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    if (!options?.replace) window.scrollTo({ top: 0 })
   }, [])
 
   return { path, navigate }

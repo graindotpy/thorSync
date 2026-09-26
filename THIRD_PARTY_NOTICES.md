@@ -15,3 +15,15 @@ licensed separately.
 
 The catalogue contains hashes and descriptive metadata only. It contains no
 ROM bytes, screenshots, box art, or emulator software.
+
+# Bundled fonts
+
+The web interface bundles the following typefaces through the Fontsource npm
+packages. Each is licensed under the
+[SIL Open Font License 1.1](https://openfontlicense.org/); the full license
+text ships inside each package in `web/node_modules`.
+
+- **Source Serif 4** — Copyright 2014–2023 Adobe
+  (`@fontsource-variable/source-serif-4`)
+- **IBM Plex Sans** and **IBM Plex Mono** — Copyright © 2017 IBM Corp.
+  (`@fontsource/ibm-plex-sans`, `@fontsource/ibm-plex-mono`)

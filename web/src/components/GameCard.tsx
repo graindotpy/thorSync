@@ -1,5 +1,5 @@
-import { AlertTriangle, ArrowRight, Clock3, Monitor, Smartphone } from 'lucide-react'
 import { timeAgo } from '../lib/format'
+import { gameStateLine, needsAttention } from '../lib/present'
 import type { Game } from '../types'
 import { DeliveryBadge } from './StatusBadge'
 import { PlatformArt } from './PlatformArt'
@@ -10,54 +10,70 @@ interface GameCardProps {
 }
 
 export function GameCard({ game, onOpen }: GameCardProps) {
-  const DeviceIcon = game.sourceDeviceId === 'thor' ? Smartphone : Monitor
+  const attention = needsAttention(game)
   return (
     <article
-      className={`game-card ${game.hasConflict ? 'game-card--attention' : ''}`}
+      className={`game-card ${attention ? 'game-card--attention' : ''}`}
       tabIndex={0}
       role="button"
       aria-label={`Open ${game.title}`}
       onClick={() => onOpen(game.id)}
       onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') onOpen(game.id)
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen(game.id)
+        }
       }}
     >
-      <div className="game-card__visual">
-        <PlatformArt platform={game.platform} title={game.title} accent={game.accent} artworkUrl={game.artworkUrl} />
-        <div className="game-card__badges">
-          <DeliveryBadge state={game.deliveryState} />
-          {game.hasConflict && (
-            <span className="status-badge status-badge--paused">
-              <AlertTriangle size={12} /> Review
-            </span>
-          )}
-        </div>
-        <button className="game-card__open" type="button" tabIndex={-1} aria-hidden="true">
-          <ArrowRight size={17} />
-        </button>
+      <div className="game-card__cover">
+        <PlatformArt platform={game.platform} title={game.title} seed={game.id} artworkUrl={game.artworkUrl} />
+        {game.hasConflict && <span className="stamp">Needs review</span>}
       </div>
       <div className="game-card__body">
-        <div className="game-card__heading">
-          <div>
-            <span className="game-card__platform">{game.platform}</span>
-            <h3>{game.title}</h3>
-          </div>
-          <span className="game-card__revisions">{game.revisionCount} saves</span>
+        <h3>{game.title}</h3>
+        <div className="game-card__state">
+          <DeliveryBadge state={game.deliveryState} />
+          <time dateTime={game.updatedAt}>{timeAgo(game.updatedAt)}</time>
         </div>
-        <div className="game-card__meta">
-          <span>
-            <DeviceIcon size={14} /> {game.sourceDeviceName}
-          </span>
-          <span>
-            <Clock3 size={14} /> {timeAgo(game.updatedAt)}
-          </span>
-        </div>
-        {game.healthMessage && (
-          <p className={`game-card__message game-card__message--${game.deliveryState}`}>
-            {game.healthMessage}
-          </p>
-        )}
+        <p className="game-card__meta">Last saved on {game.sourceDeviceName}</p>
+        {attention && <p className="game-card__note">{gameStateLine(game)}</p>}
       </div>
     </article>
+  )
+}
+
+export function GameLedger({ games, onOpen }: { games: Game[]; onOpen: (gameId: string) => void }) {
+  return (
+    <div className="ledger-wrap">
+      <table className="ledger">
+        <thead>
+          <tr>
+            <th scope="col">Game</th>
+            <th scope="col">System</th>
+            <th scope="col">State</th>
+            <th scope="col">Last saved on</th>
+            <th scope="col" className="ledger__num">Revisions</th>
+            <th scope="col" className="ledger__num">When</th>
+          </tr>
+        </thead>
+        <tbody>
+          {games.map((game) => (
+            <tr key={game.id} className={needsAttention(game) ? 'ledger__row--attention' : ''} onClick={() => onOpen(game.id)}>
+              <td>
+                <button type="button" className="ledger__title" aria-label={`Open ${game.title}`} onClick={(event) => { event.stopPropagation(); onOpen(game.id) }}>
+                  {game.title}
+                </button>
+                {needsAttention(game) && <small className="ledger__note">{gameStateLine(game)}</small>}
+              </td>
+              <td className="ledger__muted">{game.platform}</td>
+              <td><DeliveryBadge state={game.deliveryState} /></td>
+              <td className="ledger__muted">{game.sourceDeviceName}</td>
+              <td className="ledger__num">{game.revisionCount}</td>
+              <td className="ledger__num ledger__muted"><time dateTime={game.updatedAt}>{timeAgo(game.updatedAt)}</time></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }

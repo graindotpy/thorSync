@@ -1,33 +1,31 @@
-import {
-  AlertTriangle,
-  ArrowLeft,
-	BookmarkPlus,
-  Check,
-  CheckCircle2,
-  Clock3,
-  Copy,
-  FileArchive,
-  History,
-  Monitor,
-  Pencil,
-  RefreshCw,
-  RotateCcw,
-  ShieldCheck,
-  Smartphone,
-  Upload,
-} from 'lucide-react'
+import { ArrowLeft, BookmarkPlus, Check, ImageUp, RefreshCw, RotateCcw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
+import { ConfirmCheck, Modal } from '../components/Modal'
+import { SectionHeader } from '../components/PageHeader'
 import { DeliveryBadge } from '../components/StatusBadge'
-import { Modal } from '../components/Modal'
 import { PlatformArt } from '../components/PlatformArt'
 import { createIdempotencyKey, createManualSnapshot, loadGame, mapSaveToGame, restoreRevision, uploadArtwork } from '../lib/api'
 import { fileSize, fullDate, sentenceCase, timeAgo } from '../lib/format'
+import { clockTime, shortDate } from '../lib/present'
 import type { GameDetail, Revision, SaveBinding, WindowsGbaProfileId } from '../types'
 
 interface GameDetailPageProps {
   gameId: string
   navigate: (path: string) => void
   demoMode: boolean
+}
+
+const revisionKinds: Record<Revision['kind'], string> = {
+  capture: 'Captured',
+  restore: 'Restored',
+  promotion: 'Chosen in a conflict',
+  snapshot: 'Snapshot',
+}
+
+const provenanceLabels: Record<Revision['provenance'], string> = {
+  confirmed: 'Source confirmed',
+  inferred: 'Source inferred',
+  unknown: 'Source unknown',
 }
 
 export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPageProps) {
@@ -39,7 +37,7 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
   const [restoring, setRestoring] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [uploadingArt, setUploadingArt] = useState(false)
-	const [snapshotting, setSnapshotting] = useState(false)
+  const [snapshotting, setSnapshotting] = useState(false)
   const [profileBinding, setProfileBinding] = useState<SaveBinding | null>(null)
   const [selectedProfileId, setSelectedProfileId] = useState<WindowsGbaProfileId>('windows-mgba')
   const [profileAcknowledged, setProfileAcknowledged] = useState(false)
@@ -61,6 +59,11 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
 
   useEffect(() => void fetchGame(), [fetchGame])
 
+  const showNotice = (message: string) => {
+    setNotice(message)
+    window.setTimeout(() => setNotice(null), 4_000)
+  }
+
   const closeRestore = () => {
     if (restoring) return
     setSelectedRevision(null)
@@ -80,9 +83,8 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
         })
         await fetchGame()
       }
-      setNotice(`Restore queued from revision ${selectedRevision.shortHash}`)
+      showNotice(`Restore queued from revision ${selectedRevision.shortHash}`)
       closeRestore()
-      window.setTimeout(() => setNotice(null), 4_000)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Restore could not be queued')
     } finally {
@@ -92,22 +94,40 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
     }
   }
 
-	const takeSnapshot = async () => {
-		if (!game || snapshotting) return
-		setSnapshotting(true)
-		try {
-			if (!demoMode) {
-				await createManualSnapshot(game.id, game.currentRevisionId)
-				await fetchGame()
-			}
-			setNotice('Manual snapshot added to the timeline')
-			window.setTimeout(() => setNotice(null), 4_000)
-		} catch (cause) {
-			setError(cause instanceof Error ? cause.message : 'Snapshot could not be created')
-		} finally {
-			setSnapshotting(false)
-		}
-	}
+  const takeSnapshot = async () => {
+    if (!game || snapshotting) return
+    setSnapshotting(true)
+    try {
+      if (!demoMode) {
+        await createManualSnapshot(game.id, game.currentRevisionId)
+        await fetchGame()
+      }
+      showNotice('Manual snapshot added to the timeline')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Snapshot could not be created')
+    } finally {
+      setSnapshotting(false)
+    }
+  }
+
+  const changeArtwork = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!game) return
+    const file = event.target.files?.[0]
+    if (!file) return
+    setUploadingArt(true)
+    try {
+      if (!demoMode) {
+        await uploadArtwork(game.id, file)
+        await fetchGame()
+      }
+      showNotice('Custom cover updated')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Artwork upload failed')
+    } finally {
+      setUploadingArt(false)
+      event.target.value = ''
+    }
+  }
 
   const editProfile = (binding: SaveBinding) => {
     setProfileBinding(binding)
@@ -146,8 +166,7 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
         setProfileBinding(null)
         setProfileAcknowledged(false)
       }
-      setNotice(`Windows profile changed to ${selectedProfileId === 'windows-mgba' ? 'Standalone mGBA' : 'VBA-M'}; the save path and delivery baseline were kept.`)
-      window.setTimeout(() => setNotice(null), 4_000)
+      showNotice(`Windows profile changed to ${selectedProfileId === 'windows-mgba' ? 'Standalone mGBA' : 'VBA-M'}; the save path and delivery baseline were kept.`)
     } catch (cause) {
       setProfileError(cause instanceof Error ? cause.message : 'Could not change this game’s Windows emulator')
     } finally {
@@ -155,123 +174,117 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
     }
   }
 
-  if (loading) return <GameDetailSkeleton />
+  if (loading && !game) return <GameDetailSkeleton />
 
-  if (error || !game) {
+  if (error && !game) {
     return (
-      <div className="detail-error">
-        <span><AlertTriangle size={24} /></span>
+      <div className="empty empty--large">
         <h1>We couldn’t open this game</h1>
-        <p>{error ?? 'This game may have been removed.'}</p>
-        <button className="button button--primary" type="button" onClick={() => navigate('/')}>
-          Back to library
-        </button>
+        <p>{error}</p>
+        <button className="button button--primary" type="button" onClick={() => navigate('/')}>Back to library</button>
       </div>
     )
   }
 
+  if (!game) return null
+
   return (
     <>
-      <button className="back-button" type="button" onClick={() => navigate('/')}>
-        <ArrowLeft size={16} /> Library
-      </button>
+      <nav className="crumbs" aria-label="Breadcrumb">
+        <button className="link-button" type="button" onClick={() => navigate('/')}><ArrowLeft size={15} />Library</button>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">{game.title}</span>
+      </nav>
 
-      <section className="game-hero" style={{ '--game-accent': game.accent } as React.CSSProperties}>
-        <div className="game-hero__art"><PlatformArt platform={game.platform} title={game.title} accent={game.accent} size="hero" artworkUrl={game.artworkUrl} /><label className="art-upload"><input type="file" accept="image/png,image/jpeg,image/webp" disabled={uploadingArt} onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; setUploadingArt(true); try { if (!demoMode) { await uploadArtwork(game.id, file); await fetchGame() } setNotice('Custom cover updated') } catch (cause) { setError(cause instanceof Error ? cause.message : 'Artwork upload failed') } finally { setUploadingArt(false); event.target.value = '' } }} /><Upload size={14} />{uploadingArt ? 'Uploading…' : 'Custom cover'}</label></div>
-        <div className="game-hero__copy">
-          <div className="game-hero__tags">
-            <span className="platform-chip">{game.platform}</span>
-            <DeliveryBadge state={game.deliveryState} />
-          </div>
+      <header className="game-head">
+        <div className="game-head__cover">
+          <PlatformArt platform={game.platform} title={game.title} seed={game.id} size="hero" artworkUrl={game.artworkUrl} />
+          <label className="link-button game-head__art">
+            <input type="file" accept="image/png,image/jpeg,image/webp" disabled={uploadingArt} onChange={(event) => void changeArtwork(event)} />
+            <ImageUp size={14} />{uploadingArt ? 'Uploading…' : game.artworkUrl ? 'Replace cover' : 'Add a cover image'}
+          </label>
+        </div>
+        <div className="game-head__copy">
+          <p className="game-head__kicker">{game.platform === 'NDS' ? 'Nintendo DS' : 'Game Boy Advance'} · {game.emulator}</p>
           <h1>{game.title}</h1>
-          <p>{game.emulator}</p>
-          <div className="game-hero__facts">
-            <span><Clock3 size={15} /><small>Last save</small><strong>{timeAgo(game.updatedAt)}</strong></span>
-            <span>{game.sourceDeviceId === 'thor' ? <Smartphone size={15} /> : <Monitor size={15} />}<small>Saved on</small><strong>{game.sourceDeviceName}</strong></span>
-            <span><History size={15} /><small>History</small><strong>{game.revisionCount} revisions</strong></span>
-          </div>
+          <p className={`game-head__status ${game.hasConflict ? 'game-head__status--attention' : ''}`}>
+            <strong>{game.hasConflict ? 'Sync paused safely.' : 'Progress protected.'}</strong>{' '}
+            {sentence(game.healthMessage ?? 'The current save is archived and delivered to both devices.')}
+            {game.hasConflict && <> <button type="button" className="link-button" onClick={() => navigate('/review')}>Resolve in Review</button></>}
+          </p>
+          <dl className="facts facts--row">
+            <div><dt>State</dt><dd><DeliveryBadge state={game.deliveryState} /></dd></div>
+            <div><dt>Last save</dt><dd title={fullDate(game.updatedAt)}>{timeAgo(game.updatedAt)}</dd></div>
+            <div><dt>Saved on</dt><dd>{game.sourceDeviceName}</dd></div>
+            <div><dt>Revisions</dt><dd>{game.revisionCount}</dd></div>
+          </dl>
+          {error && <p className="form-error" role="alert">{error}</p>}
         </div>
-        <div className="game-hero__status">
-          <span className={`hero-health hero-health--${game.hasConflict ? 'warn' : 'ok'}`}>
-            {game.hasConflict ? <AlertTriangle size={20} /> : <ShieldCheck size={20} />}
-          </span>
-          <div>
-            <strong>{game.hasConflict ? 'Sync paused safely' : 'Progress protected'}</strong>
-            <p>{game.healthMessage ?? 'The current save is archived and delivered to both devices.'}</p>
-          </div>
-        </div>
-      </section>
+      </header>
 
-      <div className="detail-layout">
-        <section className="panel timeline-panel">
-          <div className="panel__header">
-            <div><span className="eyebrow">Immutable history</span><h2>Save timeline</h2></div>
-			<div className="timeline-actions"><button type="button" className="button button--quiet" disabled={snapshotting} onClick={() => void takeSnapshot()}>{snapshotting ? <RefreshCw size={14} className="spin-slow" /> : <BookmarkPlus size={14} />}{snapshotting ? 'Saving…' : 'Snapshot now'}</button><span className="count-pill">{game.revisions.length} shown</span></div>
-          </div>
-          <div className="timeline">
-            {game.revisions.map((revision, index) => (
-              <article className={`timeline-item ${revision.state === 'head' ? 'timeline-item--head' : ''}`} key={revision.id}>
-                <div className="timeline-item__rail">
-                  <span>{revision.state === 'head' ? <Check size={13} /> : null}</span>
-                  {index < game.revisions.length - 1 && <i />}
-                </div>
-                <div className="timeline-item__body">
-                  <div className="timeline-item__top">
-                    <div>
-                      <strong>{revision.state === 'head' ? 'Current save' : sentenceCase(revision.kind)}</strong>
-                      <span className={`provenance provenance--${revision.provenance}`}>{revision.provenance}</span>
-                    </div>
-                    <time title={fullDate(revision.observedAt)}>{timeAgo(revision.observedAt)}</time>
+      <div className="game-body">
+        <section className="history" aria-labelledby="history-heading">
+          <SectionHeader
+            id="history-heading"
+            title="Save history"
+            description="Every version ThorSync has seen. Restoring adds a new entry at the top; nothing below is ever erased."
+            actions={
+              <button type="button" className="button" disabled={snapshotting} onClick={() => void takeSnapshot()}>
+                {snapshotting ? <RefreshCw size={15} className="spin" /> : <BookmarkPlus size={15} />}{snapshotting ? 'Saving…' : 'Snapshot now'}
+              </button>
+            }
+          />
+          <ol className="timeline">
+            {game.revisions.map((revision) => (
+              <li className={`timeline__entry timeline__entry--${revision.state}`} key={revision.id}>
+                <time className="timeline__when" dateTime={revision.observedAt} title={fullDate(revision.observedAt)}>
+                  <span>{shortDate(revision.observedAt)}</span>
+                  <span>{clockTime(revision.observedAt)}</span>
+                </time>
+                <span className="timeline__mark" aria-hidden="true">{revision.state === 'head' && <Check size={11} strokeWidth={3} />}</span>
+                <div className="timeline__body">
+                  <div className="timeline__title">
+                    <strong>{revision.state === 'head' ? 'Current save' : revisionKinds[revision.kind] ?? sentenceCase(revision.kind)}</strong>
+                    {revision.state === 'branch' && <span className="tag tag--warn">Branch</span>}
+                    {revision.state === 'quarantined' && <span className="tag tag--danger">Quarantined</span>}
                   </div>
-                  <p>
-                    {revision.sourceDeviceId === 'thor' ? <Smartphone size={14} /> : <Monitor size={14} />}
-                    {revision.sourceDeviceName}
-                    <span>·</span>
-                    {fileSize(revision.size)}
-                  </p>
-                  <div className="timeline-item__bottom">
-                    <code><Copy size={12} /> {revision.shortHash}</code>
-                    {revision.state !== 'head' && revision.state !== 'quarantined' && (
-                      <button type="button" className="text-button" onClick={() => setSelectedRevision(revision)}>
-                        <RotateCcw size={14} /> Restore this save
-                      </button>
-                    )}
-                  </div>
-                  {revision.note && <small className="timeline-item__note">{revision.note}</small>}
+                  <p>{revision.sourceDeviceName} · {fileSize(revision.size)} · <span className={`provenance provenance--${revision.provenance}`}>{provenanceLabels[revision.provenance]}</span></p>
+                  <code className="timeline__hash">{revision.shortHash}</code>
+                  {revision.note && <p className="timeline__note">{revision.note}</p>}
                 </div>
-              </article>
+                <div className="timeline__action">
+                  {revision.state !== 'head' && revision.state !== 'quarantined' && (
+                    <button type="button" className="button button--small button--ghost" onClick={() => setSelectedRevision(revision)}>
+                      <RotateCcw size={14} />Restore this save
+                    </button>
+                  )}
+                </div>
+              </li>
             ))}
-          </div>
+          </ol>
         </section>
 
-        <aside className="detail-aside">
-          <section className="panel bindings-panel">
-            <div className="panel__header"><div><span className="eyebrow">Destinations</span><h2>Device copies</h2></div></div>
-            <div className="binding-list">
-              {game.bindings.map((binding) => (
-                <div className="binding" key={binding.id}>
-                  <span className="binding__icon">
-                    {binding.endpointId === 'thor' ? <Smartphone size={18} /> : <Monitor size={18} />}
-                  </span>
-                  <div>
-                    <strong>{binding.endpointName}</strong>
-                    <code>{binding.relativePath}</code>
-                    <small>{binding.profileName}{binding.hasRtc ? ' · RTC preserved' : ''}</small>
-                    <small>{binding.lastDeliveredAt ? `Delivered ${timeAgo(binding.lastDeliveredAt)}` : 'No copy found'}</small>
-                  </div>
-                  <div className="binding__actions">
-                    <DeliveryBadge state={binding.deliveryState} />
-                    {game.platform === 'GBA' && binding.endpointId === 'windows' && <button type="button" className="text-button" onClick={() => editProfile(binding)}><Pencil size={12} />Change profile</button>}
-                  </div>
+        <aside className="copies" aria-labelledby="copies-heading">
+          <SectionHeader id="copies-heading" title="On each device" />
+          <ul className="copy-list">
+            {game.bindings.map((binding) => (
+              <li className="copy" key={binding.id}>
+                <div className="copy__header">
+                  <strong>{binding.endpointName}</strong>
+                  <DeliveryBadge state={binding.deliveryState} />
                 </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel safety-panel">
-            <FileArchive size={20} />
-            <div><strong>Originals stay immutable</strong><p>A restore creates a new revision. It never erases or rewinds this history.</p></div>
-          </section>
+                <code className="copy__path">{binding.relativePath}</code>
+                <dl className="facts facts--compact">
+                  <div><dt>Emulator</dt><dd>{binding.profileName}{binding.hasRtc ? ' · RTC kept' : ''}</dd></div>
+                  <div><dt>Delivered</dt><dd>{binding.lastDeliveredAt ? timeAgo(binding.lastDeliveredAt) : 'No copy found'}</dd></div>
+                </dl>
+                {game.platform === 'GBA' && binding.endpointId === 'windows' && (
+                  <button type="button" className="link-button" onClick={() => editProfile(binding)}>Change profile</button>
+                )}
+              </li>
+            ))}
+          </ul>
+          <p className="aside-note">A restore makes a new revision. It never rewinds or deletes the history on the left.</p>
         </aside>
       </div>
 
@@ -282,28 +295,25 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
         onClose={closeProfileEditor}
         footer={
           <>
-            <button type="button" className="button button--quiet" onClick={closeProfileEditor} disabled={updatingProfile}>Cancel</button>
+            <button type="button" className="button" onClick={closeProfileEditor} disabled={updatingProfile}>Cancel</button>
             <button type="button" className="button button--primary" disabled={!profileAcknowledged || updatingProfile || selectedProfileId === profileBinding?.profileId} onClick={() => void confirmProfileChange()}>
-              {updatingProfile ? <RefreshCw size={16} className="spin-slow" /> : <CheckCircle2 size={16} />}
+              {updatingProfile && <RefreshCw size={16} className="spin" />}
               {updatingProfile ? 'Updating…' : 'Update profile'}
             </button>
           </>
         }
       >
         {profileBinding && <>
-          <div className="emulator-options binding-profile-options" role="radiogroup" aria-label="Windows GBA emulator for this game">
-            <label className={selectedProfileId === 'windows-mgba' ? 'selected' : ''}><input type="radio" name="game-windows-gba-profile" value="windows-mgba" checked={selectedProfileId === 'windows-mgba'} onChange={() => setSelectedProfileId('windows-mgba')} /><span><strong>Standalone mGBA</strong><small>Preserves its optional 16-byte RTC footer.</small></span></label>
-            <label className={selectedProfileId === 'windows-vbam' ? 'selected' : ''}><input type="radio" name="game-windows-gba-profile" value="windows-vbam" checked={selectedProfileId === 'windows-vbam'} onChange={() => setSelectedProfileId('windows-vbam')} /><span><strong>VBA-M</strong><small>Materializes raw battery-save bytes.</small></span></label>
+          <div className="choices" role="radiogroup" aria-label="Windows GBA emulator for this game">
+            <label className="choice"><input type="radio" name="game-windows-gba-profile" value="windows-mgba" checked={selectedProfileId === 'windows-mgba'} onChange={() => setSelectedProfileId('windows-mgba')} /><span><strong>Standalone mGBA</strong><small>Keeps its optional 16-byte RTC footer.</small></span></label>
+            <label className="choice"><input type="radio" name="game-windows-gba-profile" value="windows-vbam" checked={selectedProfileId === 'windows-vbam'} onChange={() => setSelectedProfileId('windows-vbam')} /><span><strong>VBA-M</strong><small>Writes raw battery-save bytes.</small></span></label>
           </div>
-          <div className="restore-summary binding-profile-summary">
-            <div><span>Save path</span><code>{profileBinding.relativePath}</code></div>
-            <div><span>Delivery baseline</span><code>{profileBinding.baselineRevisionId ?? 'Not established'}</code></div>
-          </div>
-          <label className="confirm-check">
-            <input type="checkbox" checked={profileAcknowledged} onChange={(event) => setProfileAcknowledged(event.target.checked)} />
-            <span><CheckCircle2 size={19} /><strong>I’ve closed this game in every emulator</strong><small>ThorSync will immediately re-check the existing Windows save with the selected adapter.</small></span>
-          </label>
-          {profileError && <p className="form-error"><AlertTriangle size={14} />{profileError}</p>}
+          <dl className="summary-list">
+            <div><dt>Save path</dt><dd><code>{profileBinding.relativePath}</code></dd></div>
+            <div><dt>Delivery baseline</dt><dd><code>{profileBinding.baselineRevisionId ?? 'Not established'}</code></dd></div>
+          </dl>
+          <ConfirmCheck checked={profileAcknowledged} onChange={setProfileAcknowledged} title="I’ve closed this game in every emulator" detail="ThorSync will immediately re-check the existing Windows save with the selected adapter." />
+          {profileError && <p className="form-error" role="alert">{profileError}</p>}
         </>}
       </Modal>
 
@@ -314,41 +324,42 @@ export function GameDetailPage({ gameId, navigate, demoMode }: GameDetailPagePro
         onClose={closeRestore}
         footer={
           <>
-            <button type="button" className="button button--quiet" onClick={closeRestore} disabled={restoring}>Cancel</button>
+            <button type="button" className="button" onClick={closeRestore} disabled={restoring}>Cancel</button>
             <button type="button" className="button button--danger" disabled={!acknowledged || restoring} onClick={() => void confirmRestore()}>
-              {restoring ? <RefreshCw size={16} className="spin-slow" /> : <RotateCcw size={16} />}
+              {restoring ? <RefreshCw size={16} className="spin" /> : <RotateCcw size={16} />}
               {restoring ? 'Queuing restore…' : 'Restore and deliver'}
             </button>
           </>
         }
       >
         {selectedRevision && (
-          <div className="restore-summary">
-            <div><span>Revision</span><code>{selectedRevision.shortHash}</code></div>
-            <div><span>Captured</span><strong>{fullDate(selectedRevision.observedAt)}</strong></div>
-            <div><span>From</span><strong>{selectedRevision.sourceDeviceName}</strong></div>
-          </div>
+          <dl className="summary-list">
+            <div><dt>Revision</dt><dd><code>{selectedRevision.shortHash}</code></dd></div>
+            <div><dt>Captured</dt><dd>{fullDate(selectedRevision.observedAt)}</dd></div>
+            <div><dt>From</dt><dd>{selectedRevision.sourceDeviceName}</dd></div>
+          </dl>
         )}
-        <label className="confirm-check">
-          <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />
-          <span><CheckCircle2 size={19} /><strong>I’ve closed this game on both devices</strong><small>This prevents an emulator from overwriting the restored save with stale data.</small></span>
-        </label>
+        <ConfirmCheck checked={acknowledged} onChange={setAcknowledged} title="I’ve closed this game on both devices" detail="This stops an emulator from overwriting the restored save with stale data." />
       </Modal>
 
-      {notice && <div className="toast" role="status"><CheckCircle2 size={17} />{notice}</div>}
+      {notice && <div className="toast" role="status">{notice}</div>}
     </>
   )
 }
 
+function sentence(value: string): string {
+  return /[.!?…]$/.test(value.trim()) ? value : `${value.trim()}.`
+}
+
 function GameDetailSkeleton() {
   return (
-    <div className="detail-skeleton" aria-label="Loading game">
+    <div className="skeleton-page" aria-label="Loading game">
       <div className="skeleton skeleton--line" />
-      <div className="skeleton skeleton--hero" />
-      <div className="detail-layout">
-        <div className="skeleton skeleton--panel" />
-        <div className="skeleton skeleton--panel" />
+      <div className="skeleton-row">
+        <div className="skeleton skeleton--cover" />
+        <div className="skeleton-stack"><div className="skeleton skeleton--title" /><div className="skeleton skeleton--line" /><div className="skeleton skeleton--line" /></div>
       </div>
+      <div className="skeleton skeleton--panel" />
     </div>
   )
 }
